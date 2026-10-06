@@ -90,20 +90,32 @@ python validate_dataset.py --dataset_dir path/to/dataset_folder
 
 ## 🚀 Huấn luyện mô hình (Training)
 
-### 1. Lệnh huấn luyện cơ bản
+### 1. Lệnh chạy huấn luyện tiêu chuẩn (Recommended Training Command)
+Chạy huấn luyện mô hình ACT trên GPU 0 với cấu hình tối ưu 100 epochs, batch size 32:
+
 ```bash
-python train.py --dataset_dir path/to/dataset --output_dir checkpoints/act_openarm
+CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
+    --dataset_dir data_set/data_set \
+    --output_dir checkpoints/act_openarm \
+    --epochs 100 \
+    --batch_size 32 \
+    --lr 1e-4 \
+    --lr_backbone 1e-5 \
+    --kl_weight 10.0 \
+    --warmup_epochs 15 \
+    --val_split 0.15 \
+    --eval_every 10 \
+    --save_every 50 \
+    --device cuda
 ```
 
-### 2. Chọn GPU cụ thể trên Server SSH
-Nếu server có nhiều GPU (kiểm tra bằng `nvidia-smi`), dùng `CUDA_VISIBLE_DEVICES` để chỉ định GPU còn trống:
-
+### 2. Lệnh huấn luyện cơ bản hoặc chạy qua script entrypoint:
 ```bash
-# Chạy trên GPU 0:
-CUDA_VISIBLE_DEVICES=0 python train.py --dataset_dir path/to/dataset --output_dir checkpoints/act_openarm
+# Chạy trực tiếp qua train.py:
+python train.py --dataset_dir data_set/data_set --output_dir checkpoints/act_openarm
 
-# Chạy trên GPU 1:
-CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir path/to/dataset --output_dir checkpoints/act_openarm
+# Chọn GPU cụ thể (ví dụ GPU 1):
+CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_dir checkpoints/act_openarm
 ```
 
 ### 3. Các siêu tham số quan trọng
@@ -142,20 +154,27 @@ Truy cập trình duyệt: `http://localhost:6006`
 
 ## 🎯 Đánh giá mô hình (Evaluation)
 
-Chạy benchmark trên tập dữ liệu kiểm thử (hỗ trợ cả checkpoint PyTorch `.pth` và ONNX `.onnx`):
-```bash
-# Đánh giá với file PyTorch checkpoint:
-python eval.py \
-  --checkpoint_path checkpoints/act_openarm/best_checkpoint.pth \
-  --dataset_dir path/to/dataset \
-  --output_dir eval_results/
+### 1. Lệnh chạy đánh giá tiêu chuẩn (Recommended Evaluation Command)
+Chạy benchmark định lượng và kiểm tra sai số trên tập dữ liệu kiểm thử với GPU 0:
 
-# Hoặc đánh giá trực tiếp với file ONNX:
-python eval.py \
-  --checkpoint_path checkpoints/act_openarm/best_checkpoint.onnx \
-  --dataset_dir path/to/dataset \
-  --output_dir eval_results/
+```bash
+CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.eval \
+    --checkpoint_path checkpoints/act_openarm/best_checkpoint.pth \
+    --dataset_dir data_set/data_set \
+    --output_dir evaluation_results \
+    --device cuda
 ```
+
+### 2. Đánh giá trực tiếp với mô hình ONNX:
+Hệ thống hỗ trợ nạp trực tiếp mô hình ONNX để benchmark:
+```bash
+CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.eval \
+    --checkpoint_path checkpoints/act_openarm/best_checkpoint.onnx \
+    --dataset_dir data_set/data_set \
+    --output_dir evaluation_results \
+    --device cuda
+```
+
 
 ---
 
