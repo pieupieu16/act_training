@@ -100,24 +100,34 @@ python resample_dataset.py --input_dir data_set/data_set --output_dir data_set/d
 
 ## 🚀 Huấn luyện mô hình (Training)
 
-### 0. Khởi tạo phiên làm việc với tmux (Khuyên dùng khi chạy trên Server qua SSH)
+### 0. Khởi tạo phiên làm việc với tmux & Thiết lập môi trường (Khuyên dùng khi chạy trên Server)
 Khi huấn luyện trên máy chủ từ xa qua SSH, hãy sử dụng `tmux` để tiến trình huấn luyện liên tục chạy ngầm ổn định ngay cả khi ngắt kết nối SSH, gập laptop hoặc rớt mạng:
 
+#### Bước 0.1: Tạo phiên tmux và môi trường ảo
 ```bash
 # 1. Tạo một phiên tmux mới có tên là 'act_train'
 tmux new -s act_train
 
-# 2. Tạo môi trường ảo (nếu chưa có) và kích hoạt:
+# 2. Tạo môi trường ảo Python và kích hoạt:
 python3 -m venv venv
 source venv/bin/activate
-
-# (Nếu là lần đầu chạy trên server, cài đặt các thư viện cần thiết):
-# pip install --upgrade pip
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-# pip install -r requirements.txt
 ```
 
-*(Lưu ý: Nếu hệ thống báo lỗi `The virtual environment was not created successfully because ensurepip is not available`, chạy: `sudo apt update && sudo apt install -y python3-venv python3-pip`)*
+*(Lưu ý: Nếu hệ thống báo lỗi thiếu gói venv, chạy: `sudo apt update && sudo apt install -y python3-venv python3-pip`)*
+
+#### Bước 0.2: Cài đặt đầy đủ các thư viện cần thiết (Dependencies)
+Chạy các lệnh sau bên trong môi trường `(venv)` để tải và cài đặt toàn bộ thư viện:
+
+```bash
+# 1. Nâng cấp công cụ cài đặt pip
+pip install --upgrade pip
+
+# 2. Cài đặt PyTorch có hỗ trợ GPU CUDA (Ví dụ CUDA 12.1):
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# 3. Cài đặt toàn bộ thư viện cần thiết (h5py, onnx, onnxruntime, scipy, tensorboard, opencv...)
+pip install -r requirements.txt
+```
 
 > **💡 Các thao tác và phím tắt tmux cần nhớ:**
 > - **Rời khỏi phiên (Detach)** để tiến trình chạy ngầm: Nhấn tổ hợp phím **`Ctrl + B`**, sau đó thả tay ra và nhấn **`D`**.
