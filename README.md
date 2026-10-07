@@ -100,6 +100,35 @@ python resample_dataset.py --input_dir data_set/data_set --output_dir data_set/d
 
 ## 🚀 Huấn luyện mô hình (Training)
 
+### 0. Khởi tạo phiên làm việc với tmux (Khuyên dùng khi chạy trên Server qua SSH)
+Khi huấn luyện trên máy chủ từ xa qua SSH, hãy sử dụng `tmux` để tiến trình huấn luyện liên tục chạy ngầm ổn định ngay cả khi ngắt kết nối SSH, gập laptop hoặc rớt mạng:
+
+```bash
+# 1. Tạo một phiên tmux mới có tên là 'act_train'
+tmux new -s act_train
+
+# 2. Kích hoạt môi trường ảo Python trong tmux
+source venv/bin/activate
+```
+
+> **💡 Các thao tác và phím tắt tmux cần nhớ:**
+> - **Rời khỏi phiên (Detach)** để tiến trình chạy ngầm: Nhấn tổ hợp phím **`Ctrl + B`**, sau đó thả tay ra và nhấn **`D`**.
+> - **Quay lại phiên (Re-attach)** để theo dõi log huấn luyện:
+>   ```bash
+>   tmux attach -t act_train
+>   ```
+> - **Xem danh sách các phiên đang chạy:**
+>   ```bash
+>   tmux ls
+>   ```
+> - **Đóng/Xóa phiên tmux** (khi huấn luyện xong):
+>   ```bash
+>   tmux kill-session -t act_train
+>   # Hoặc gõ lệnh 'exit' trực tiếp bên trong phiên tmux
+>   ```
+
+---
+
 ### 1. Lệnh chạy huấn luyện tiêu chuẩn (Recommended Training Command)
 Chạy huấn luyện mô hình ACT trên GPU 0 với cấu hình tối ưu 100 epochs, batch size 32, đánh giá và lưu checkpoint mỗi 10 epochs:
 
@@ -163,10 +192,11 @@ CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
 ```
 
 ### 1. Khởi chạy TensorBoard:
-Mở một terminal mới trên server và chạy:
+Mở một terminal mới trên server (hoặc tạo một phiên tmux riêng `tmux new -s act_tb`) và chạy:
 ```bash
 tensorboard --logdir checkpoints/act_openarm/tensorboard --port 6007
 ```
+*(Nếu chạy trong tmux, nhấn **`Ctrl + B`** rồi nhấn **`D`** để detach ra ngoài mà TensorBoard vẫn tiếp tục chạy).*
 
 ### Bước 2: Mở đường hầm SSH từ máy cá nhân của bạn
 
