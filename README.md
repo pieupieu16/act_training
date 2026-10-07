@@ -107,9 +107,17 @@ Khi huấn luyện trên máy chủ từ xa qua SSH, hãy sử dụng `tmux` đ�
 # 1. Tạo một phiên tmux mới có tên là 'act_train'
 tmux new -s act_train
 
-# 2. Kích hoạt môi trường ảo Python trong tmux
+# 2. Tạo môi trường ảo (nếu chưa có) và kích hoạt:
+python3 -m venv venv
 source venv/bin/activate
+
+# (Nếu là lần đầu chạy trên server, cài đặt các thư viện cần thiết):
+# pip install --upgrade pip
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# pip install -r requirements.txt
 ```
+
+*(Lưu ý: Nếu hệ thống báo lỗi `The virtual environment was not created successfully because ensurepip is not available`, chạy: `sudo apt update && sudo apt install -y python3-venv python3-pip`)*
 
 > **💡 Các thao tác và phím tắt tmux cần nhớ:**
 > - **Rời khỏi phiên (Detach)** để tiến trình chạy ngầm: Nhấn tổ hợp phím **`Ctrl + B`**, sau đó thả tay ra và nhấn **`D`**.
