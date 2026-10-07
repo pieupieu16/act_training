@@ -180,15 +180,19 @@ def export_act_to_onnx(
     with open(meta_json_path, "w", encoding="utf-8") as f:
         json.dump(meta_dict, f, indent=2, ensure_ascii=False)
 
-    # Embed metadata into ONNX model if onnx package is available
+    # Embed metadata into ONNX model and make model self-contained (no .data file)
     if ONNX_AVAILABLE:
         try:
-            onnx_model = onnx.load(output_path)
+            onnx_model = onnx.load(output_path, load_external_data=True)
             meta_str = json.dumps(meta_dict, ensure_ascii=False)
             meta_entry = onnx_model.metadata_props.add()
             meta_entry.key = "act_metadata"
             meta_entry.value = meta_str
-            onnx.save(onnx_model, output_path)
+            # Lưu gọn thành 1 file .onnx duy nhất, không tách file .onnx.data
+            onnx.save_model(onnx_model, output_path, save_as_external_data=False)
+            ext_data_file = output_path + ".data"
+            if os.path.exists(ext_data_file):
+                os.remove(ext_data_file)
         except Exception as exc:
             log_warn(f"Không thể nhúng metadata trực tiếp vào file ONNX: {exc}")
 

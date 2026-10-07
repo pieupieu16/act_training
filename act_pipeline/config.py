@@ -69,10 +69,10 @@ class TrainConfig:
     
     # Validation & Logging
     val_split: float = 0.15         # 15% validation data
-    eval_every: int = 10            # Đánh giá validation mỗi N epochs
-    save_every: int = 50            # Lưu checkpoint định kỳ mỗi N epochs
+    eval_every: int = 10            # Đánh giá validation mỗi N epochs (mặc định 10)
+    save_every: int = 10            # Lưu checkpoint định kỳ mỗi N epochs (mặc định 10)
     log_every_steps: int = 10       # In progress mỗi N batches
-    use_tensorboard: bool = True
+    use_tensorboard: bool = False
     use_wandb: bool = False
     wandb_project: str = "act-openarm"
     wandb_entity: Optional[str] = None

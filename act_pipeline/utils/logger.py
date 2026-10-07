@@ -41,6 +41,9 @@ class MetricLogger:
         wandb_project: str = "act-openarm",
         wandb_entity: Optional[str] = None,
         config_dict: Optional[Dict[str, Any]] = None,
+        save_log_file: bool = False,
+        save_metrics_jsonl: bool = False,
+        save_config_json: bool = False,
     ):
         if not log_dir:
             raise ValueError("log_dir không được rỗng hoặc None.")
@@ -49,6 +52,9 @@ class MetricLogger:
         os.makedirs(self.log_dir, exist_ok=True)
 
         self.exp_name = exp_name
+        self.save_log_file = save_log_file
+        self.save_metrics_jsonl = save_metrics_jsonl
+        self.save_config_json = save_config_json
         self.metrics_file = os.path.join(self.log_dir, "metrics.jsonl")
         self.log_file = os.path.join(self.log_dir, "train.log")
 
@@ -57,15 +63,16 @@ class MetricLogger:
         self.logger.setLevel(logging.INFO)
         self.logger.handlers.clear()
 
-        # File Handler
-        file_handler = logging.FileHandler(self.log_file, mode="a", encoding="utf-8")
-        file_formatter = logging.Formatter(
-            "[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        file_handler.setFormatter(file_formatter)
-        self.logger.addHandler(file_handler)
+        # File Handler (chỉ tạo khi save_log_file=True)
+        if self.save_log_file:
+            file_handler = logging.FileHandler(self.log_file, mode="a", encoding="utf-8")
+            file_formatter = logging.Formatter(
+                "[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+            )
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
 
-        # Console Stream Handler
+        # Console Stream Handler (luôn luôn ghi ra Terminal)
         console_handler = logging.StreamHandler(sys.stdout)
         console_formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
         console_handler.setFormatter(console_formatter)
@@ -104,8 +111,8 @@ class MetricLogger:
                 self.error(f"[LỖI] Không thể khởi động WandB: {e}")
                 raise
 
-        # Lưu config dưới dạng JSON
-        if config_dict is not None:
+        # Lưu config dưới dạng JSON (chỉ khi save_config_json=True)
+        if self.save_config_json and config_dict is not None:
             config_path = os.path.join(self.log_dir, "config.json")
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config_dict, f, indent=2, default=str)
@@ -149,9 +156,10 @@ class MetricLogger:
             **{f"{prefix}{k}": v for k, v in metrics.items()}
         }
 
-        # Ghi vào metrics.jsonl
-        with open(self.metrics_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+        # Ghi vào metrics.jsonl (nếu bật)
+        if self.save_metrics_jsonl:
+            with open(self.metrics_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
 
         # Ghi vào TensorBoard
         if self._require_tb_writer("log_metrics"):

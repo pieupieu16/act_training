@@ -76,95 +76,75 @@ class CheckpointManager:
         is_best: bool = False,
         save_periodic: bool = False,
         save_onnx: bool = True,
+        save_pth: bool = False,
         save_periodic_onnx: bool = False,
         opset_version: int = 18,
     ) -> Dict[str, str]:
         """
-        Lưu trạng thái huấn luyện đầy đủ vào file checkpoint PyTorch (.pth)
-        và tự động xuất sang định dạng ONNX (.onnx) cho các best checkpoints.
+        Lưu checkpoint mô hình ACT.
+        Theo cấu hình mặc định tinh gọn, chỉ lưu duy nhất best_checkpoint.onnx
+        và best_checkpoint_metadata.json (cùng dataset_stats.pkl) để triển khai trực tiếp.
         """
         saved_paths = {}
 
-        # Trích xuất state_dict của mô hình (xử lý DataParallel nếu có)
-        model_state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-
-        checkpoint_data = {
-            "epoch": epoch,
-            "global_step": global_step,
-            "model_state_dict": model_state,
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-            "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
-            "stats": stats,
-            "config": config,
-            "metrics": metrics,
-        }
-
-        # 1. Luôn lưu vào latest_checkpoint.pth để đảm bảo an toàn nếu gặp sự cố sập nguồn/ngắt kết nối
-        torch.save(checkpoint_data, self.latest_checkpoint_path)
-        saved_paths["latest"] = self.latest_checkpoint_path
-
-        # 2. Lưu checkpoint tốt nhất nếu is_best = True
-        if is_best:
-            torch.save(checkpoint_data, self.best_checkpoint_path)
-            saved_paths["best"] = self.best_checkpoint_path
-
-            # Đồng thời lưu một bản weights rút gọn nhẹ phục vụ triển khai chạy thực tế trên robot (Deployment)
-            deploy_data = {
+        # 1. Chỉ lưu các file PyTorch (.pth) nếu save_pth=True
+        if save_pth:
+            model_state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
+            checkpoint_data = {
+                "epoch": epoch,
+                "global_step": global_step,
                 "model_state_dict": model_state,
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+                "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
                 "stats": stats,
                 "config": config,
-                "best_epoch": epoch,
-                "best_metrics": metrics,
+                "metrics": metrics,
             }
-            torch.save(deploy_data, self.deploy_weights_path)
-            saved_paths["deploy"] = self.deploy_weights_path
+            torch.save(checkpoint_data, self.latest_checkpoint_path)
+            saved_paths["latest"] = self.latest_checkpoint_path
 
-            # Xuất sang định dạng ONNX cho Best Checkpoint
-            if save_onnx:
-                try:
-                    export_act_to_onnx(
-                        model=model,
-                        output_path=self.best_onnx_path,
-                        config=config,
-                        stats=stats,
-                        opset_version=opset_version,
-                        dynamic_batch=True,
-                        verify_with_ort=True,
-                    )
-                    saved_paths["best_onnx"] = self.best_onnx_path
+            if is_best:
+                torch.save(checkpoint_data, self.best_checkpoint_path)
+                saved_paths["best"] = self.best_checkpoint_path
 
-                    # Tạo bản copy hoặc export cho deploy_model.onnx
-                    import shutil
-                    shutil.copyfile(self.best_onnx_path, self.deploy_onnx_path)
-                    best_meta = os.path.splitext(self.best_onnx_path)[0] + "_metadata.json"
-                    deploy_meta = os.path.splitext(self.deploy_onnx_path)[0] + "_metadata.json"
-                    if os.path.exists(best_meta):
-                        shutil.copyfile(best_meta, deploy_meta)
-                    saved_paths["deploy_onnx"] = self.deploy_onnx_path
-                except Exception as exc:
-                    print(f"[!] Cảnh báo: Xuất ONNX cho Best Checkpoint thất bại: {exc}")
+            if save_periodic:
+                periodic_path = os.path.join(self.checkpoint_dir, f"checkpoint_epoch_{epoch:04d}.pth")
+                torch.save(checkpoint_data, periodic_path)
+                saved_paths["periodic"] = periodic_path
 
-        # 3. Lưu định kỳ mỗi N epoch nếu yêu cầu
-        if save_periodic:
-            periodic_path = os.path.join(self.checkpoint_dir, f"checkpoint_epoch_{epoch:04d}.pth")
-            torch.save(checkpoint_data, periodic_path)
-            saved_paths["periodic"] = periodic_path
+        # 2. Xuất mô hình ONNX khi đạt Best Checkpoint
+        if is_best and save_onnx:
+            try:
+                export_act_to_onnx(
+                    model=model,
+                    output_path=self.best_onnx_path,
+                    config=config,
+                    stats=stats,
+                    opset_version=opset_version,
+                    dynamic_batch=True,
+                    verify_with_ort=True,
+                )
+                saved_paths["best_onnx"] = self.best_onnx_path
+                saved_paths["metadata"] = os.path.splitext(self.best_onnx_path)[0] + "_metadata.json"
+            except Exception as exc:
+                print(f"[!] Cảnh báo: Xuất ONNX cho Best Checkpoint thất bại: {exc}")
 
-            if save_periodic_onnx and save_onnx:
-                periodic_onnx_path = os.path.join(self.checkpoint_dir, f"checkpoint_epoch_{epoch:04d}.onnx")
-                try:
-                    export_act_to_onnx(
-                        model=model,
-                        output_path=periodic_onnx_path,
-                        config=config,
-                        stats=stats,
-                        opset_version=opset_version,
-                        dynamic_batch=True,
-                    )
-                    saved_paths["periodic_onnx"] = periodic_onnx_path
-                except Exception as exc:
-                    print(f"[!] Cảnh báo: Xuất ONNX định kỳ epoch {epoch} thất bại: {exc}")
+        # 3. Xuất ONNX định kỳ nếu yêu cầu
+        if save_periodic and save_periodic_onnx and save_onnx:
+            periodic_onnx_path = os.path.join(self.checkpoint_dir, f"checkpoint_epoch_{epoch:04d}.onnx")
+            try:
+                export_act_to_onnx(
+                    model=model,
+                    output_path=periodic_onnx_path,
+                    config=config,
+                    stats=stats,
+                    opset_version=opset_version,
+                    dynamic_batch=True,
+                )
+                saved_paths["periodic_onnx"] = periodic_onnx_path
+            except Exception as exc:
+                print(f"[!] Cảnh báo: Xuất ONNX định kỳ epoch {epoch} thất bại: {exc}")
 
         return saved_paths
 

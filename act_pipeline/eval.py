@@ -94,7 +94,7 @@ def evaluate_dataset_batch(
             total_mse_rad += diff_rad_sq.sum()
 
     avg_l1_norm = total_l1_norm / len(dataloader.dataset)
-    avg_per_joint_mae_rad = (per_joint_mae_rad / max(total_samples / 16.0, 1.0)).tolist()
+    avg_per_joint_mae_rad = (per_joint_mae_rad / max(total_samples, 1.0)).tolist()
     avg_l1_rad = float(np.mean(avg_per_joint_mae_rad))
     avg_mse_rad = float(total_mse_rad / max(total_samples, 1.0))
 
@@ -228,8 +228,17 @@ def eval_pipeline(args):
 
     # 1. Tải Checkpoint & Thống kê chuẩn hóa (Stats)
     if not os.path.exists(args.checkpoint_path):
-        print(f"[X] LỖI: Không tìm thấy file checkpoint tại: {args.checkpoint_path}")
-        sys.exit(1)
+        if args.checkpoint_path.endswith(".pth"):
+            onnx_alt = args.checkpoint_path[:-4] + ".onnx"
+            if os.path.exists(onnx_alt):
+                print(f"[*] Không tìm thấy {args.checkpoint_path}, tự động chuyển sang mô hình ONNX: {onnx_alt}")
+                args.checkpoint_path = onnx_alt
+            else:
+                print(f"[X] LỖI: Không tìm thấy file checkpoint tại: {args.checkpoint_path} hoặc {onnx_alt}")
+                sys.exit(1)
+        else:
+            print(f"[X] LỖI: Không tìm thấy file checkpoint tại: {args.checkpoint_path}")
+            sys.exit(1)
 
     is_onnx = args.checkpoint_path.endswith(".onnx")
     if is_onnx:

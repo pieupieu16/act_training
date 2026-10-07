@@ -140,6 +140,9 @@ def train_pipeline(args):
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         config_dict=vars(args),
+        save_log_file=getattr(args, "save_logs", False),
+        save_metrics_jsonl=getattr(args, "save_logs", False),
+        save_config_json=getattr(args, "save_logs", False),
     )
     logger.setup_custom_scalars_layout()
     checkpoint_mgr = CheckpointManager(checkpoint_dir=args.output_dir)
@@ -544,26 +547,26 @@ def train_pipeline(args):
             is_best=is_best,
             save_periodic=save_periodic,
             save_onnx=not args.no_onnx,
+            save_pth=getattr(args, "save_pth", False),
             save_periodic_onnx=args.onnx_periodic,
             opset_version=args.onnx_opset,
         )
 
         if is_best:
-            best_pth = saved_files.get("best", "")
             best_onnx = saved_files.get("best_onnx", "")
-            onnx_info = f" | ONNX: {best_onnx}" if best_onnx else ""
-            logger.info(f"   🏆 ĐẠT KỶ LỤC MỚI! Best Val Loss: {best_val_loss:.4f} -> Đã lưu: {best_pth}{onnx_info}")
+            logger.info(f"   🏆 ĐẠT KỶ LỤC MỚI! Best Val Loss: {best_val_loss:.4f} -> Đã lưu: {best_onnx}")
 
     # Hoàn tất huấn luyện
     total_duration_min = (time.time() - start_train_time) / 60.0
     logger.info("=" * 80)
     logger.info(f"   🎉 HUẤN LUYỆN HOÀN TẤT THÀNH CÔNG TRONG {total_duration_min:.2f} PHÚT!")
-    logger.info(f"   + Best Checkpoint (PyTorch) : {checkpoint_mgr.best_checkpoint_path}")
     if not args.no_onnx:
         logger.info(f"   + Best Checkpoint (ONNX)    : {checkpoint_mgr.best_onnx_path}")
-        logger.info(f"   + Deploy Model (ONNX)       : {checkpoint_mgr.deploy_onnx_path}")
-    logger.info(f"   + Latest Checkpoint (PyTorch): {checkpoint_mgr.latest_checkpoint_path}")
-    logger.info(f"   + Deployment Weights (.pth) : {checkpoint_mgr.deploy_weights_path}")
+        logger.info(f"   + Metadata chuẩn hóa (JSON) : {os.path.splitext(checkpoint_mgr.best_onnx_path)[0] + '_metadata.json'}")
+    logger.info(f"   + Thống kê chuẩn hóa (pkl)  : {stats_path}")
+    if getattr(args, "save_pth", False):
+        logger.info(f"   + Best Checkpoint (PyTorch) : {checkpoint_mgr.best_checkpoint_path}")
+        logger.info(f"   + Latest Checkpoint (PyTorch): {checkpoint_mgr.latest_checkpoint_path}")
     logger.info("=" * 80)
 
     # Ghi tóm tắt HParams để so sánh A/B giữa các thí nghiệm trên TensorBoard HParams Tab
@@ -633,11 +636,14 @@ def parse_args():
     parser.add_argument("--depth_max_m", type=float, default=1.2, help="Khoảng cách bàn tối đa (m)")
     parser.add_argument("--step_stride", type=int, default=1, help="Bước nhảy lấy mẫu start_t trong episode")
 
-    # Đánh giá & Lưu trữ
+    # Đánh giá & Lưu trữ (Mặc định mỗi 10 epoch sẽ đánh giá và lưu checkpoint)
     parser.add_argument("--val_split", type=float, default=0.15, help="Tỷ lệ tập validation (ví dụ 0.15 = 15%%)")
-    parser.add_argument("--eval_every", type=int, default=10, help="Đánh giá validation mỗi N epochs")
-    parser.add_argument("--save_every", type=int, default=50, help="Lưu checkpoint định kỳ mỗi N epochs")
+    parser.add_argument("--eval_every", type=int, default=10, help="Đánh giá validation mỗi N epochs (mặc định: 10)")
+    parser.add_argument("--save_every", type=int, default=10, help="Chu kỳ lưu checkpoint mỗi N epochs (mặc định: 10)")
     parser.add_argument("--log_every_steps", type=int, default=10, help="Ghi nhận metric mỗi N bước batch")
+    parser.add_argument("--save_pth", action="store_true", help="Lưu thêm file checkpoint PyTorch (.pth) nếu cần")
+    parser.add_argument("--save_logs", action="store_true", help="Lưu thêm file log train.log, metrics.jsonl, config.json")
+    parser.add_argument("--use_tensorboard", action="store_true", help="Bật ghi nhận dữ liệu TensorBoard")
     parser.add_argument("--no_onnx", action="store_true", help="Tắt tự động xuất mô hình ONNX khi lưu best checkpoint")
     parser.add_argument("--onnx_opset", type=int, default=18, help="Phiên bản ONNX opset (mặc định 18)")
     parser.add_argument("--onnx_periodic", action="store_true", help="Xuất ONNX cho cả các checkpoint lưu định kỳ mỗi N epochs")
@@ -649,7 +655,6 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Seed ngẫu nhiên")
 
     # Logging nâng cao
-    parser.add_argument("--no_tensorboard", action="store_true", help="Tắt ghi TensorBoard")
     parser.add_argument("--tb_histogram_every", type=int, default=10, help="Ghi histogram trọng số và gradient mỗi N epochs")
     parser.add_argument("--tb_image_every", type=int, default=10, help="Ghi ảnh mẫu validation mỗi N epochs")
     parser.add_argument("--tb_embedding_every", type=int, default=50, help="Ghi CVAE embedding mỗi N epochs")
@@ -659,7 +664,6 @@ def parse_args():
 
     args = parser.parse_args()
     args.use_amp = not args.no_amp
-    args.use_tensorboard = not args.no_tensorboard
     return args
 
 

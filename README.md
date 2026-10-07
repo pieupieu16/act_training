@@ -91,7 +91,7 @@ python validate_dataset.py --dataset_dir path/to/dataset_folder
 ## 🚀 Huấn luyện mô hình (Training)
 
 ### 1. Lệnh chạy huấn luyện tiêu chuẩn (Recommended Training Command)
-Chạy huấn luyện mô hình ACT trên GPU 0 với cấu hình tối ưu 100 epochs, batch size 32:
+Chạy huấn luyện mô hình ACT trên GPU 0 với cấu hình tối ưu 100 epochs, batch size 32, đánh giá và lưu checkpoint mỗi 10 epochs:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
@@ -105,7 +105,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
     --warmup_epochs 15 \
     --val_split 0.15 \
     --eval_every 10 \
-    --save_every 50 \
+    --save_every 10 \
     --device cuda
 ```
 
@@ -123,7 +123,7 @@ CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_
 | Tham số | Mặc định | Ý nghĩa |
 | :--- | :--- | :--- |
 | `--dataset_dir` | `dataset/` | Thư mục chứa các file `.hdf5` |
-| `--output_dir` | `checkpoints/act_openarm` | Thư mục lưu checkpoint và TensorBoard logs |
+| `--output_dir` | `checkpoints/act_openarm` | Thư mục lưu checkpoint ONNX và normalization stats |
 | `--epochs` | `500` | Tổng số epochs huấn luyện |
 | `--batch_size` | `16` | Kích thước batch (GPU 16GB tối ưu ở 16, 24GB có thể dùng 32) |
 | `--chunk_size` | `50` | Độ dài cửa sổ hành động tương lai ($k = 50$ bước $\approx 1.0$ giây @ 50Hz) |
@@ -131,24 +131,41 @@ CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_
 | `--lr_backbone` | `1e-5` | Learning rate nhỏ cho Conv1 4-Channel Adapter |
 | `--kl_weight` | `10.0` | Hệ số phạt $\beta$ cho hàm mất mát KL Divergence |
 | `--val_split` | `0.15` | Tỷ lệ phân chia tập validation (15% số episode) |
-| `--resume` | `None` | Khôi phục huấn luyện (`auto` để tìm checkpoint mới nhất) |
-| `--no_amp` | `False` | Tắt Automatic Mixed Precision FP16 nếu GPU không hỗ trợ |
+| `--eval_every` | `10` | Chu kỳ đánh giá tập validation (mặc định 10 epochs) |
+| `--save_every` | `10` | Chu kỳ kiểm tra và lưu checkpoint (mặc định 10 epochs) |
+| `--save_pth` | `False` | (Tùy chọn) Lưu thêm file checkpoint PyTorch `.pth` |
+| `--save_logs` | `False` | (Tùy chọn) Lưu thêm file text `train.log`, `metrics.jsonl` |
+| `--use_tensorboard` | `False` | (Tùy chọn) Bật ghi nhật ký đồ thị TensorBoard |
 
 ---
 
 ## 📈 Giám sát quá trình huấn luyện với TensorBoard
 
-Mở tab terminal mới và chạy:
+Nếu bạn muốn ghi nhật ký đồ thị TensorBoard, hãy thêm cờ `--use_tensorboard` khi chạy lệnh huấn luyện:
+```bash
+CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
+    --dataset_dir data_set/data_set \
+    --output_dir checkpoints/act_openarm \
+    --epochs 100 \
+    --batch_size 32 \
+    --use_tensorboard \
+    --device cuda
+```
+
+### 1. Khởi chạy TensorBoard:
+Mở một terminal mới và chạy:
 ```bash
 tensorboard --logdir checkpoints/act_openarm/tensorboard --port 6006
 ```
-Truy cập trình duyệt: `http://localhost:6006`
+Truy cập trình duyệt tại: `http://localhost:6006`
 
-**Các đồ thị chính theo dõi:**
-- `loss/total_train` & `loss/total_val`: Tổng độ mất mát.
-- `loss/recon_l1_val`: Sai số phục dựng hành động thực tế.
-- `loss/kl_val`: Mức độ đa dạng của phân phối tiềm ẩn $z$.
-- `per_joint_mae/val_joint_*`: Sai số chi tiết trên từng khớp trong 16 khớp robot.
+### 2. Mở giao diện TensorBoard từ máy cá nhân (khi train trên Server SSH):
+Chạy lệnh chuyển tiếp cổng (SSH Tunnel) trên terminal máy cá nhân của bạn:
+```bash
+# Cú pháp: ssh -N -L 6006:localhost:6006 <user>@<ip_server>
+ssh -N -L 6006:localhost:6006 quan@192.168.1.100
+```
+Sau đó mở trình duyệt máy tính cá nhân và truy cập: `http://localhost:6006`
 
 ---
 
@@ -159,34 +176,24 @@ Chạy benchmark định lượng và kiểm tra sai số trên tập dữ liệ
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.eval \
-    --checkpoint_path checkpoints/act_openarm/best_checkpoint.pth \
-    --dataset_dir data_set/data_set \
-    --output_dir evaluation_results \
-    --device cuda
-```
-
-### 2. Đánh giá trực tiếp với mô hình ONNX:
-Hệ thống hỗ trợ nạp trực tiếp mô hình ONNX để benchmark:
-```bash
-CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.eval \
     --checkpoint_path checkpoints/act_openarm/best_checkpoint.onnx \
     --dataset_dir data_set/data_set \
     --output_dir evaluation_results \
     --device cuda
 ```
 
+*(Hệ thống hỗ trợ nạp cả file `.onnx` hoặc tự động tìm `.onnx` nếu truyền đường dẫn `.pth`)*
 
 ---
 
-## 🤖 Xuất Checkpoint để Deploy sang Robot / Dashboard (ONNX & PyTorch)
+## 🤖 Định dạng Checkpoint sau khi chạy (Chỉ lưu 3 file)
 
-Khi huấn luyện, pipeline **tự động lưu cả hai định dạng** PyTorch (`.pth`) và ONNX (`.onnx`) trong `--output_dir`:
-1. `best_checkpoint.pth`: Checkpoint PyTorch tối ưu nhất (model + optimizer + scheduler + scaler) dùng để tiếp tục huấn luyện (`--resume`).
-2. `best_checkpoint.onnx`: **Mô hình định dạng ONNX tối ưu nhất**, tối ưu hóa tính toán đồ thị suy luận (Inference Graph) cho edge computing, ROS2, C++, TensorRT hoặc ONNX Runtime.
-3. `best_checkpoint_metadata.json`: Chứa đầy đủ thông số chuẩn hóa Z-score ($Mean$, $Std$) và cấu hình kiến trúc model đi kèm.
-4. `act_deploy_model.onnx`: Bản sao ONNX sẵn sàng nạp trực tiếp vào chương trình điều khiển robot.
-5. `act_deploy_weights.pth`: Trọng số PyTorch tinh gọn chỉ chứa model weights và normalization stats.
-6. `dataset_stats.pkl`: File Pickle lưu thống kê $Mean$ và $Std$ của góc khớp và hành động.
+Khi hoàn tất huấn luyện, pipeline được thiết kế tinh gọn để **chỉ lưu đúng 3 file quan trọng nhất** trong `--output_dir`:
+1. **`best_checkpoint.onnx`**: Mô hình đồ thị ONNX tốt nhất (Best Checkpoint) được tối ưu hóa cho suy luận thời gian thực trên robot thật (ROS2, C++, Python ONNX Runtime, TensorRT).
+2. **`best_checkpoint_metadata.json`**: File JSON chứa đầy đủ thông số chuẩn hóa Z-score ($Mean$, $Std$ của 16 động cơ) và cấu hình model để phía điều khiển robot unnormalize góc khớp mà **không cần cài đặt PyTorch**.
+3. **`dataset_stats.pkl`**: File Pickle lưu thống kê $Mean$ và $Std$ của góc khớp và hành động.
+
+Chu kỳ kiểm tra và cập nhật checkpoint là **mỗi 10 epoch** (`--save_every 10`, `--eval_every 10`).
 
 ### Xuất thủ công file checkpoint .pth sang .onnx bất kỳ lúc nào:
 ```bash
@@ -196,4 +203,31 @@ python export_onnx.py \
   --opset 18
 ```
 
-# act_training
+---
+
+## 📥 Lệnh tải Best Checkpoint từ Server về Máy cá nhân / Robot
+
+Chạy các lệnh dưới đây trên **terminal của máy cá nhân hoặc máy tính gắn trên robot** để kéo model về:
+
+### Cách 1: Dùng lệnh `scp` (Đơn giản, sẵn có trên Linux / macOS / Windows PowerShell)
+```bash
+# 1. Tải riêng file mô hình ONNX tốt nhất (khoảng ~108 MB):
+scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/best_checkpoint.onnx ./
+
+# 2. Tải file metadata JSON đi kèm:
+scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/best_checkpoint_metadata.json ./
+
+# 3. Tải file thống kê chuẩn hóa dataset_stats.pkl:
+scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/dataset_stats.pkl ./
+
+# Hoặc tải nhanh toàn bộ 3 file trong thư mục checkpoints về thư mục hiện tại:
+scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/* ./
+```
+
+*(Thay `username` và `<IP_SERVER>` bằng tài khoản và địa chỉ IP của server huấn luyện, ví dụ: `scp quan@192.168.1.100:...`)*
+
+### Cách 2: Dùng lệnh `rsync` (Khuyên dùng: Tốc độ cao, có hiển thị % tiến trình tải)
+```bash
+# Tải đồng bộ toàn bộ thư mục checkpoints về thư mục local của robot:
+rsync -avzP username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/ ./act_robot_models/
+```
