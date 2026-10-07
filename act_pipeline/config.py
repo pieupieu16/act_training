@@ -11,12 +11,12 @@ from typing import List, Tuple, Optional
 
 @dataclass
 class ModelConfig:
-    # Vision Backbone
+    # Vision Backbone (16:9 RealSense Camera 240x424)
     in_channels: int = 4            # RGB (3) + Depth (1)
     backbone_type: str = "resnet18" # ResNet-18 (Layers 1..4 frozen)
     freeze_backbone: bool = True    # Đóng băng ImageNet pretrained backbone
-    img_height: int = 480
-    img_width: int = 640
+    img_height: int = 240           # Chuẩn tỷ lệ 16:9 của camera RealSense (H=240, W=424)
+    img_width: int = 424
     
     # Dimensions
     d_model: int = 512              # Transformer hidden dimension
@@ -72,6 +72,8 @@ class TrainConfig:
     eval_every: int = 10            # Đánh giá validation mỗi N epochs (mặc định 10)
     save_every: int = 10            # Lưu checkpoint định kỳ mỗi N epochs (mặc định 10)
     log_every_steps: int = 10       # In progress mỗi N batches
+    target_hz: float = 50.0         # Tần số điều khiển chuẩn (50Hz = dt=0.02s)
+    auto_resample: bool = True      # Tự động phát hiện rớt frame và đồng bộ về 50Hz
     use_tensorboard: bool = False
     use_wandb: bool = False
     wandb_project: str = "act-openarm"

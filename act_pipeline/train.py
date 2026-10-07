@@ -186,6 +186,7 @@ def train_pipeline(args):
         logger.info(f"[✓] Đã lưu thống kê chuẩn hóa tại: {stats_path}")
 
     # 5. Khởi tạo Dataset & DataLoader
+    auto_resample_flag = not getattr(args, "no_auto_resample", False)
     train_dataset = BimanualEpisodicDataset(
         file_paths=train_files,
         stats=stats,
@@ -194,6 +195,8 @@ def train_pipeline(args):
         target_img_size=(args.img_height, args.img_width),
         depth_min_m=args.depth_min_m,
         depth_max_m=args.depth_max_m,
+        target_hz=getattr(args, "target_hz", 50.0),
+        auto_resample=auto_resample_flag,
     )
     val_dataset = BimanualEpisodicDataset(
         file_paths=val_files,
@@ -203,6 +206,8 @@ def train_pipeline(args):
         target_img_size=(args.img_height, args.img_width),
         depth_min_m=args.depth_min_m,
         depth_max_m=args.depth_max_m,
+        target_hz=getattr(args, "target_hz", 50.0),
+        auto_resample=auto_resample_flag,
     )
 
     train_loader = DataLoader(
@@ -629,12 +634,14 @@ def parse_args():
     parser.add_argument("--kl_weight", type=float, default=10.0, help="Trọng số beta cho KL Divergence Loss")
     parser.add_argument("--loss_type", type=str, default="l1", choices=["l1", "l2"], help="Hàm mất mát phục dựng (l1 hoặc l2)")
 
-    # Tiền xử lý RGB-D
-    parser.add_argument("--img_height", type=int, default=480, help="Chiều cao ảnh RGB-D")
-    parser.add_argument("--img_width", type=int, default=640, help="Chiều rộng ảnh RGB-D")
+    # Tiền xử lý RGB-D (Chuẩn 16:9 RealSense Camera 240x424)
+    parser.add_argument("--img_height", type=int, default=240, help="Chiều cao ảnh RGB-D (mặc định 240 cho chuẩn 16:9 RealSense)")
+    parser.add_argument("--img_width", type=int, default=424, help="Chiều rộng ảnh RGB-D (mặc định 424 cho chuẩn 16:9 RealSense)")
     parser.add_argument("--depth_min_m", type=float, default=0.2, help="Khoảng cách bàn tối thiểu (m)")
     parser.add_argument("--depth_max_m", type=float, default=1.2, help="Khoảng cách bàn tối đa (m)")
     parser.add_argument("--step_stride", type=int, default=1, help="Bước nhảy lấy mẫu start_t trong episode")
+    parser.add_argument("--target_hz", type=float, default=50.0, help="Tần số lấy mẫu/điều khiển chuẩn (mặc định: 50.0 Hz = 20ms)")
+    parser.add_argument("--no_auto_resample", action="store_true", help="Tắt tự động lấy mẫu lại đồng đều 50Hz khi phát hiện rớt frame/jitter")
 
     # Đánh giá & Lưu trữ (Mặc định mỗi 10 epoch sẽ đánh giá và lưu checkpoint)
     parser.add_argument("--val_split", type=float, default=0.15, help="Tỷ lệ tập validation (ví dụ 0.15 = 15%%)")

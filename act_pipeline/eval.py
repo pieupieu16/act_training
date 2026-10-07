@@ -139,6 +139,18 @@ def simulate_episode_rollout(
         qpos_seq = f["observations/qpos"][:].astype(np.float32)
         T = len(gt_actions)
 
+        # Kiểm tra và đồng bộ thời gian nếu phát hiện rớt frame/jitter
+        from act_pipeline.data.resample import extract_timestamps, compute_resampling_plan, resample_signals
+        t_raw, has_ts, ts_stats = extract_timestamps(f, T, default_hz=50.0)
+        if ts_stats["jitter_detected"]:
+            t_uniform, frame_indices = compute_resampling_plan(t_raw, target_hz=50.0)
+            gt_actions = resample_signals(t_raw, gt_actions, t_uniform)
+            qpos_seq = resample_signals(t_raw, qpos_seq, t_uniform)
+            T = len(t_uniform)
+            use_frame_map = True
+        else:
+            use_frame_map = False
+
         obs_img = f["observations/images"]
         raw_rgb = None
         raw_depth = None
@@ -153,11 +165,12 @@ def simulate_episode_rollout(
         ensemble_pred_actions = []
 
         for t in range(T):
-            # 1. Tiền xử lý RGB-D tại bước t
-            rgb_t = raw_rgb[t] if raw_rgb.ndim == 4 else raw_rgb[t][..., :3]
-            depth_t = raw_depth[t] if raw_depth is not None else None
+            cam_idx = frame_indices[t] if use_frame_map else t
+            # 1. Tiền xử lý RGB-D tại bước t (bảo toàn tỷ lệ khung hình 16:9)
+            rgb_t = raw_rgb[cam_idx] if raw_rgb.ndim == 4 else raw_rgb[cam_idx][..., :3]
+            depth_t = raw_depth[cam_idx] if raw_depth is not None else None
             
-            rgbd_tensor = preprocess_rgbd(rgb_t, depth_t).unsqueeze(0).to(device) # [1, 4, H, W]
+            rgbd_tensor = preprocess_rgbd(rgb_t, depth_t, preserve_aspect_ratio=True).unsqueeze(0).to(device) # [1, 4, H, W]
 
             # 2. Tiền xử lý qpos
             norm_qpos = normalize_data(qpos_seq[t], stats["qpos_mean"], stats["qpos_std"])
@@ -263,11 +276,11 @@ def eval_pipeline(args):
         meta_cfg = onnx_model.metadata.get("config", {})
         model_cfg = ModelConfig(
             in_channels=onnx_model.metadata.get("in_channels", 4),
-            img_height=onnx_model.metadata.get("img_height", 480),
-            img_width=onnx_model.metadata.get("img_width", 640),
-            chunk_size=onnx_model.metadata.get("chunk_size", 50),
-            action_dim=onnx_model.metadata.get("action_dim", 16),
-            qpos_dim=onnx_model.metadata.get("qpos_dim", 16),
+            img_height=onnx_model.metadata.get("img_height", meta_cfg.get("img_height", 240)),
+            img_width=onnx_model.metadata.get("img_width", meta_cfg.get("img_width", 424)),
+            chunk_size=onnx_model.metadata.get("chunk_size", meta_cfg.get("chunk_size", 50)),
+            action_dim=onnx_model.metadata.get("action_dim", meta_cfg.get("action_dim", 16)),
+            qpos_dim=onnx_model.metadata.get("qpos_dim", meta_cfg.get("qpos_dim", 16)),
         )
         print("[✓] Đã nạp thành công mô hình ONNX và sẵn sàng đánh giá định lượng!")
     else:
@@ -289,6 +302,8 @@ def eval_pipeline(args):
             in_channels=4,
             backbone_type="resnet18",
             freeze_backbone=True,
+            img_height=saved_cfg.get("img_height", 240),
+            img_width=saved_cfg.get("img_width", 424),
             d_model=saved_cfg.get("d_model", 512),
             nheads=saved_cfg.get("nheads", 8),
             dim_feedforward=saved_cfg.get("dim_feedforward", 2048),
@@ -320,6 +335,8 @@ def eval_pipeline(args):
         chunk_size=model_cfg.chunk_size,
         step_stride=2,
         target_img_size=(model_cfg.img_height, model_cfg.img_width),
+        target_hz=50.0,
+        auto_resample=True,
     )
     eval_loader = DataLoader(
         eval_dataset,

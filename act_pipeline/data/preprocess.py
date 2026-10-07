@@ -24,6 +24,7 @@ def preprocess_rgbd(
     depth_min_m: float = 0.2,
     depth_max_m: float = 1.2,
     target_size: Optional[Tuple[int, int]] = None,
+    preserve_aspect_ratio: bool = True,
 ) -> torch.Tensor:
     """
     Tiền xử lý cặp ảnh RGB và Depth thành Tensor 4 kênh cho ACT:
@@ -32,7 +33,8 @@ def preprocess_rgbd(
         depth_raw: [H, W] uint16 (mm) hoặc float32 (m). Nếu None, tự sinh kênh depth ước lượng.
         depth_min_m: Khoảng cách tối thiểu (0.2 m)
         depth_max_m: Khoảng cách tối đa (1.2 m)
-        target_size: (H_target, W_target) - Tùy chọn resize
+        target_size: (H_target, W_target) - Kích thước đích (mặc định 240x424 cho 16:9 RealSense)
+        preserve_aspect_ratio: Bảo toàn tỷ lệ khung hình, chống méo hình học bằng Letterbox padding
     Output:
         rgbd_tensor: [4, H, W] float32
     """
@@ -68,13 +70,45 @@ def preprocess_rgbd(
     # 3. Ghép thành 4 kênh: [3 RGB, 1 Depth]
     rgbd_tensor = torch.cat([rgb_norm, depth_norm], dim=0) # [4, H, W]
 
-    # 4. Tùy chọn Resize nếu target_size được chỉ định
+    # 4. Resize bảo toàn tỷ lệ khung hình (Aspect Ratio Preserving / Letterboxing)
     if target_size is not None and (H, W) != target_size:
-        rgbd_tensor = F.interpolate(
-            rgbd_tensor.unsqueeze(0),
-            size=target_size,
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(0)
+        target_h, target_w = target_size
+        src_ar = float(W) / float(H)
+        tgt_ar = float(target_w) / float(target_h)
+
+        # Nếu tỷ lệ khung hình xấp xỉ bằng nhau (lệch < 2%) hoặc không bật preserve_aspect_ratio:
+        if (not preserve_aspect_ratio) or abs(src_ar - tgt_ar) / src_ar < 0.02:
+            rgbd_tensor = F.interpolate(
+                rgbd_tensor.unsqueeze(0),
+                size=target_size,
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+        else:
+            # Letterbox: Tỷ lệ co dãn đồng đều (Isotropic Scaling) để không bao giờ méo hình học
+            scale = min(target_h / H, target_w / W)
+            new_h = int(round(H * scale))
+            new_w = int(round(W * scale))
+
+            # Resize tỷ lệ chuẩn
+            resized = F.interpolate(
+                rgbd_tensor.unsqueeze(0),
+                size=(new_h, new_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+
+            # Padding đối xứng (Symmetric Padding) bằng 0.0
+            pad_top = (target_h - new_h) // 2
+            pad_bottom = target_h - new_h - pad_top
+            pad_left = (target_w - new_w) // 2
+            pad_right = target_w - new_w - pad_left
+
+            rgbd_tensor = F.pad(
+                resized,
+                (pad_left, pad_right, pad_top, pad_bottom),
+                mode="constant",
+                value=0.0,
+            )
 
     return rgbd_tensor

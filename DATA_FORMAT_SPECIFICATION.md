@@ -45,13 +45,14 @@ root (HDF5 File: episode_XX.hdf5)
 │
 ├── /observations (Group)
 │   ├── /images (Group)
-│   │   ├── chest_rgb       : [T, 480, 640, 3] | uint8   | Ảnh màu RGB (0-255)
-│   │   └── chest_depth     : [T, 480, 640]    | uint16  | Bản đồ độ sâu Depth Z (milimét: 0 - 65535)
+│   │   ├── chest_rgb       : [T, 240, 424, 3] | uint8   | Ảnh màu RGB (0-255, chuẩn 16:9 RealSense)
+│   │   └── chest_depth     : [T, 240, 424]    | uint16  | Bản đồ độ sâu Depth Z (milimét: 0 - 65535)
 │   │
 │   ├── qpos                : [T, 16]          | float32 | Góc vị trí 16 motor (Radian)
 │   ├── qvel                : [T, 16]          | float32 | Vận tốc góc 16 motor (Radian/s)
 │   └── effort              : [T, 16]          | float32 | Mô-men xoắn 16 motor (Nm - Tùy chọn)
 │
+├── timestamp_ns            : [T]              | int64   | Timestamps thực tế từng bước (Nanoseconds)
 └── /action                 : [T, 16]          | float32 | Góc mục tiêu 16 motor cho bước kế tiếp (Radian)
 ```
 
@@ -59,8 +60,9 @@ root (HDF5 File: episode_XX.hdf5)
 
 | Tên trường (Key) | Kích thước (Shape) | Kiểu dữ liệu | Đơn vị | Quy định kỹ thuật bắt buộc |
 | :--- | :--- | :--- | :---: | :--- |
-| `/observations/images/chest_rgb` | `[T, 480, 640, 3]` | `uint8` ($0 - 255$) | Pixel | **Chuẩn RGB** (OpenCV đọc mặc định BGR $\to$ phải convert `cv2.cvtColor(img, cv2.COLOR_BGR2RGB)` trước khi ghi file). |
-| `/observations/images/chest_depth`| `[T, 480, 640]` | `uint16` ($0 - 65535$) | Milimét (mm) | **Bắt buộc bật `align_to_color`** từ SDK camera để tọa độ $(u, v)$ của Depth trùng khớp $100\%$ với điểm ảnh RGB. Lưu `uint16` để tối ưu $50\%$ dung lượng ổ cứng so với `float32`. |
+| `/observations/images/chest_rgb` | `[T, 240, 424, 3]` | `uint8` ($0 - 255$) | Pixel | **Chuẩn RGB tỷ lệ 16:9** (424x240 hoặc 848x480). Không ép về 4:3 (480x640) gây méo hình học không gian. |
+| `/observations/images/chest_depth`| `[T, 240, 424]` | `uint16` ($0 - 65535$) | Milimét (mm) | **Bắt buộc bật `align_to_color`** từ SDK camera để tọa độ $(u, v)$ của Depth trùng khớp $100\%$ với điểm ảnh RGB. Lưu `uint16` để tối ưu $50\%$ dung lượng ổ cứng so với `float32`. |
+| `timestamp_ns` | `[T]` | `int64` | Nanoseconds | **Thời điểm ghi nhận thực tế**. Dùng để đồng bộ hóa tần số 50 Hz và phát hiện rớt khung hình (Frame Drop). |
 | `/observations/qpos` | `[T, 16]` | `float32` | Radian | Góc thực tế của 16 động cơ: `[Tay Trái J1..J7, Kẹp Trái J8, Tay Phải J1..J7, Kẹp Phải J8]`. |
 | `/observations/qvel` | `[T, 16]` | `float32` | Rad/s | Vận tốc góc tức thời của 16 động cơ. |
 | `/observations/effort` | `[T, 16]` | `float32` | Nm | Dòng tải/Mô-men xoắn của 16 động cơ (Tùy chọn ghi nhận từ telemetry CAN). |

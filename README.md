@@ -71,20 +71,30 @@ pip install -e .
 
 ---
 
-## 📊 Chuẩn bị dữ liệu (Dataset Format)
+## 📊 Chuẩn bị dữ liệu (Dataset Format & Đồng bộ 50Hz)
 
-Tập dữ liệu phải ở định dạng **HDF5 (`.hdf5`)** theo chuẩn mô tả trong [`DATA_FORMAT_SPECIFICATION.md`](DATA_FORMAT_SPECIFICATION.md):
+Tập dữ liệu ở định dạng **HDF5 (`.hdf5`)** theo chuẩn mô tả trong [`DATA_FORMAT_SPECIFICATION.md`](DATA_FORMAT_SPECIFICATION.md):
 - **Observations:**
-  - `observations/images/chest_rgb`: Shape `[T, H, W, 3]`, kiểu `uint8`
-  - `observations/images/chest_depth`: Shape `[T, H, W]`, kiểu `uint16` (mm) hoặc `float32` (mét)
-  - `observations/qpos`: Shape `[T, 16]`, kiểu `float32` (14 khớp tay rad + 2 kẹp mét)
+  - `observations/images/chest_rgb`: Shape `[T, 240, 424, 3]`, kiểu `uint8` (Chuẩn tỷ lệ 16:9 của camera RealSense D435/D405)
+  - `observations/images/chest_depth`: Shape `[T, 240, 424]`, kiểu `uint16` (mm)
+  - `observations/qpos`: Shape `[T, 16]`, kiểu `float32` (14 khớp tay rad + 2 kẹp)
+- **Timestamps:**
+  - `timestamp_ns`: Shape `[T]`, kiểu `int64` (thời điểm ghi nhận thực tế từng bước)
 - **Actions:**
   - `action`: Shape `[T, 16]`, kiểu `float32`
 
-### Kiểm tra dữ liệu trước khi train
+### 1. Kiểm tra dữ liệu (Validate)
 ```bash
-python validate_dataset.py --dataset_dir path/to/dataset_folder
+python validate_dataset.py data_set/data_set
 ```
+Script sẽ tự động phát hiện nếu có hiện tượng rớt khung hình (Frame Drop), giật lag thời gian ($dt$ dao động) hoặc méo tỷ lệ ảnh (Aspect Ratio Distortion).
+
+### 2. Đồng bộ hóa & Khắc phục rớt khung hình (Resample to 50Hz)
+Nếu quá trình thu thập telemetry/camera bị nghẽn (tần số thực tế < 50Hz, ví dụ ~39.9Hz hoặc $dt$ giật từ 0.001s đến 0.149s), hãy chạy công cụ đồng bộ hóa để chuyển toàn bộ dataset về tần số chuẩn 50.0 Hz đồng đều:
+```bash
+python resample_dataset.py --input_dir data_set/data_set --output_dir data_set/data_set_50hz
+```
+*(Lưu ý: Ngay cả khi bạn chưa chạy resample offline, DataLoader trong pipeline huấn luyện cũng được tích hợp sẵn cơ chế **On-the-fly Resampling**, tự động phát hiện và nội suy quỹ đạo về đúng 50Hz ($dt=0.02s$) để chuỗi chunk 50 bước luôn tương đương đúng 1.0 giây vật lý!)*
 
 ---
 
@@ -153,19 +163,20 @@ CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
 ```
 
 ### 1. Khởi chạy TensorBoard:
-Mở một terminal mới và chạy:
+Mở một terminal mới trên server và chạy:
 ```bash
-tensorboard --logdir checkpoints/act_openarm/tensorboard --port 6006
+tensorboard --logdir checkpoints/act_openarm/tensorboard --port 6007
 ```
-Truy cập trình duyệt tại: `http://localhost:6006`
 
-### 2. Mở giao diện TensorBoard từ máy cá nhân (khi train trên Server SSH):
-Chạy lệnh chuyển tiếp cổng (SSH Tunnel) trên terminal máy cá nhân của bạn:
+### Bước 2: Mở đường hầm SSH từ máy cá nhân của bạn
+
+Mở một Terminal mới trên máy tính của bạn (máy laptop/PC bạn đang ngồi, không phải trên server) và chạy lệnh:
+
 ```bash
-# Cú pháp: ssh -N -L 6006:localhost:6006 <user>@<ip_server>
-ssh -N -L 6006:localhost:6006 quan@192.168.1.100
+ssh -N -L 6007:localhost:6007 toann@192.168.8.19
 ```
-Sau đó mở trình duyệt máy tính cá nhân và truy cập: `http://localhost:6006`
+
+Sau đó mở trình duyệt trên máy tính cá nhân và truy cập: `http://localhost:6007`
 
 ---
 

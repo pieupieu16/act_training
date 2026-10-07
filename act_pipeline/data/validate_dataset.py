@@ -152,7 +152,24 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
                     res.add_error(f"Kiểu dữ liệu chest_rgb là {rgb_ds.dtype}, bắt buộc phải là uint8")
                 if len(rgb_ds.shape) != 4 or rgb_ds.shape[3] != 3:
                     res.add_error(f"Shape chest_rgb là {rgb_ds.shape}, yêu cầu chuẩn [T, H, W, 3]")
-                res.info["rgb_resolution"] = f"{rgb_ds.shape[2]}x{rgb_ds.shape[1]}"
+                
+                H_img, W_img = rgb_ds.shape[1], rgb_ds.shape[2]
+                aspect_ratio = W_img / max(H_img, 1)
+                res.info["rgb_resolution"] = f"{W_img}x{H_img}"
+                res.info["aspect_ratio"] = f"{aspect_ratio:.2f}:1"
+
+                # Cảnh báo méo tỷ lệ ảnh (Aspect Ratio Distortion Check)
+                is_16_9 = abs(aspect_ratio - (16.0 / 9.0)) < 0.05 or abs(aspect_ratio - (424.0 / 240.0)) < 0.05
+                if is_16_9:
+                    res.info["aspect_type"] = "16:9 (Chuẩn RealSense OpenArm)"
+                elif abs(aspect_ratio - (4.0 / 3.0)) < 0.05:
+                    res.info["aspect_type"] = "4:3"
+                    res.add_warning(
+                        f"Ảnh có tỷ lệ 4:3 ({W_img}x{H_img}) thay vì 16:9 (240x424). "
+                        f"Cần đảm bảo config pipeline trùng khớp để tránh méo hình học!"
+                    )
+                else:
+                    res.add_warning(f"Tỷ lệ ảnh không chuẩn: {W_img}x{H_img} (AR: {aspect_ratio:.2f}:1)")
 
             # Kiểm tra ảnh Depth
             if "chest_depth" in images:
@@ -161,7 +178,11 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
                     res.add_error(f"Độ dài ảnh Depth ({len(depth_ds)}) không khớp với qpos ({T})")
                 if depth_ds.dtype != np.uint16:
                     res.add_warning(f"Kiểu dữ liệu chest_depth là {depth_ds.dtype}, khuyến nghị uint16 (mm) để tối ưu dung lượng")
-                res.info["depth_resolution"] = f"{depth_ds.shape[2]}x{depth_ds.shape[1]}"
+                
+                H_d, W_d = depth_ds.shape[1], depth_ds.shape[2]
+                res.info["depth_resolution"] = f"{W_d}x{H_d}"
+                if "chest_rgb" in images and (H_d != H_img or W_d != W_img):
+                    res.add_error(f"Độ phân giải Depth ({W_d}x{H_d}) không khớp với RGB ({W_img}x{H_img})!")
 
             # 4. KIỂM TRA SHAPE & DTYPE CỦA QPOS VÀ ACTION
             if qpos_ds.shape[-1] != 16:
@@ -196,21 +217,26 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
                         f"[{j_min:.3f}, {j_max:.3f}] vs giới hạn [{min_lim:.3f}, {max_lim:.3f}] {unit}"
                     )
 
-            # 6. KIỂM TRA TẦN SỐ THỰC TẾ DỰA TRÊN TIMESTAMPS (NẾU CÓ)
-            if "timestamp_ns" in f or "timestamp_ns" in obs:
-                ts_ds = f["timestamp_ns"] if "timestamp_ns" in f else obs["timestamp_ns"]
-                if len(ts_ds) >= 2:
-                    ts = np.array(ts_ds[:])
-                    dts = np.diff(ts) / 1e9 # đổi sang giây
-                    median_dt = float(np.median(dts))
-                    if median_dt > 0:
-                        calc_hz = 1.0 / median_dt
-                        res.info["calculated_hz"] = round(calc_hz, 1)
-                        if abs(calc_hz - expected_hz) > 3.0:
-                            res.add_error(
-                                f"Tần số ghi nhận từ timestamps là {calc_hz:.1f} Hz, lệch so với chuẩn yêu cầu {expected_hz} Hz! "
-                                f"(Chu kỳ trung bình dt = {median_dt*1000:.1f}ms thay vì {1000/expected_hz:.1f}ms)"
-                            )
+            # 6. KIỂM TRA TẦN SỐ THỰC TẾ & RỚT KHUNG HÌNH (FRAME DROP / JITTER)
+            from act_pipeline.data.resample import extract_timestamps
+            t_raw, has_ts, ts_stats = extract_timestamps(f, T, default_hz=expected_hz)
+            res.info["duration_sec"] = ts_stats["duration_seconds"]
+            res.info["actual_hz"] = ts_stats["actual_hz"]
+            res.info["dropped_frames_est"] = ts_stats["estimated_dropped_frames"]
+            res.info["drop_pct"] = ts_stats["drop_pct"]
+
+            if ts_stats["jitter_detected"]:
+                res.add_error(
+                    f"🚨 LỆCH TẦN SỐ & RỚT KHUNG HÌNH: Tần số thực tế là {ts_stats['actual_hz']:.1f} Hz (chuẩn là {expected_hz} Hz). "
+                    f"Chu kỳ dt dao động mạnh từ {ts_stats['min_dt']*1000:.1f}ms đến {ts_stats['max_dt']*1000:.1f}ms! "
+                    f"Rớt ~{ts_stats['drop_pct']:.1f}% frames ({ts_stats['estimated_dropped_frames']} bước bị mất). "
+                    f"👉 KHẮC PHỤC: Chạy lệnh 'python resample_dataset.py --input_dir <dir> --output_dir <dir_50hz>' "
+                    f"để đồng bộ hóa quỹ đạo về 50.0 Hz trước khi huấn luyện!"
+                )
+            elif abs(ts_stats["actual_hz"] - expected_hz) > 1.0:
+                res.add_warning(
+                    f"Tần số thực tế ({ts_stats['actual_hz']} Hz) hơi lệch so với yêu cầu ({expected_hz} Hz)."
+                )
 
     except Exception as e:
         res.add_error(f"Lỗi khi đọc file HDF5: {str(e)}")
@@ -279,7 +305,7 @@ def main():
         print("\n" + "=" * 70)
         print(f"Kết quả kiểm tra: {res.filename}")
         print(f"Trạng thái: {'✅ ĐẠT CHUẨN' if res.passed else '❌ CÓ LỖI'}")
-        print(f"Thông tin : {json.dumps(res.info, indent=2)}")
+        print(f"Thông tin : {json.dumps(res.info, indent=2, default=str)}")
         if res.errors:
             print("\nDanh sách lỗi:")
             for e in res.errors:

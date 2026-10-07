@@ -17,12 +17,15 @@ import h5py
 
 from act_pipeline.data.preprocess import preprocess_rgbd
 from act_pipeline.data.normalization import normalize_data
+from act_pipeline.data.resample import extract_timestamps, compute_resampling_plan, resample_signals
 
 
 class BimanualEpisodicDataset(Dataset):
     """
     Episodic Dataset cho ACT:
     - Đọc các file HDF5 đại diện cho từng Episode.
+    - Tự động phát hiện và khắc phục rớt khung hình (Frame Drop) và lệch tần số (Jitter)
+      bằng cơ chế lấy mẫu lại đồng đều về chuẩn 50.0 Hz (control_dt = 0.02s).
     - Cắt lát dữ liệu thành các mẫu: (image_t, qpos_t, actions_{t:t+k}, is_pad).
     - Quản lý padding mask chính xác khi gần cuối Episode.
     - Chuẩn hóa Z-score toàn bộ vector góc khớp và hành động.
@@ -33,9 +36,11 @@ class BimanualEpisodicDataset(Dataset):
         stats: Dict[str, np.ndarray],
         chunk_size: int = 50,
         step_stride: int = 1,
-        target_img_size: Optional[Tuple[int, int]] = (480, 640),
+        target_img_size: Optional[Tuple[int, int]] = (240, 424),
         depth_min_m: float = 0.2,
         depth_max_m: float = 1.2,
+        target_hz: float = 50.0,
+        auto_resample: bool = True,
     ):
         super().__init__()
         self.file_paths = sorted(file_paths)
@@ -48,27 +53,80 @@ class BimanualEpisodicDataset(Dataset):
         self.target_img_size = target_img_size
         self.depth_min_m = depth_min_m
         self.depth_max_m = depth_max_m
+        self.target_hz = target_hz
+        self.auto_resample = auto_resample
 
         self.samples: List[Tuple[int, int]] = [] # (file_idx, start_t)
         self.episode_lengths: List[int] = []
+
+        # Bộ nhớ đệm cho các episode cần lấy mẫu lại đồng đều (On-the-fly Resampling Cache)
+        self.episode_resampled: Dict[int, bool] = {}
+        self.episode_frame_indices: Dict[int, np.ndarray] = {}
+        self.cached_qpos: Dict[int, np.ndarray] = {}
+        self.cached_actions: Dict[int, np.ndarray] = {}
 
         self._build_index()
 
     def _build_index(self):
         """
         Quét nhanh độ dài từng episode để lập chỉ mục các lát cắt (file_idx, start_t).
+        Tự động phát hiện hiện tượng rớt khung hình / giật lag thời gian và kích hoạt
+        nội suy thời gian đồng đều 50 Hz.
         """
         total_steps = 0
+        resampled_episodes = 0
+
         for file_idx, fpath in enumerate(self.file_paths):
             with h5py.File(fpath, "r") as f:
-                T = len(f["action"])
-                self.episode_lengths.append(T)
-                total_steps += T
+                T_raw = len(f["action"])
+
+                # Kiểm tra timestamps và tần số thực tế
+                t_raw, has_ts, ts_stats = extract_timestamps(f, T_raw, default_hz=self.target_hz)
+
+                # Tự động phát hiện kích thước ảnh gốc nếu target_img_size là None
+                if self.target_img_size is None and "observations/images" in f:
+                    obs_img = f["observations/images"]
+                    for k in ["chest_rgb", "chest"]:
+                        if k in obs_img:
+                            shape = obs_img[k].shape
+                            self.target_img_size = (shape[1], shape[2])
+                            break
+
+                # Nếu cần lấy mẫu lại đồng đều về 50Hz do phát hiện rớt khung hình / lệch tần số
+                need_resample = self.auto_resample and ts_stats["jitter_detected"]
+
+                if need_resample:
+                    t_uniform, frame_indices = compute_resampling_plan(t_raw, target_hz=self.target_hz)
+                    T_ep = len(t_uniform)
+
+                    # Nội suy và chuẩn hóa qpos, actions cho episode này
+                    raw_qpos = f["observations/qpos"][:].astype(np.float32)
+                    raw_actions = f["action"][:].astype(np.float32)
+
+                    resampled_qpos = resample_signals(t_raw, raw_qpos, t_uniform)
+                    resampled_actions = resample_signals(t_raw, raw_actions, t_uniform)
+
+                    norm_qpos = normalize_data(resampled_qpos, self.stats["qpos_mean"], self.stats["qpos_std"])
+                    norm_actions = normalize_data(resampled_actions, self.stats["action_mean"], self.stats["action_std"])
+
+                    self.episode_resampled[file_idx] = True
+                    self.episode_frame_indices[file_idx] = frame_indices
+                    self.cached_qpos[file_idx] = norm_qpos
+                    self.cached_actions[file_idx] = norm_actions
+                    resampled_episodes += 1
+                else:
+                    self.episode_resampled[file_idx] = False
+                    T_ep = T_raw
+
+                self.episode_lengths.append(T_ep)
+                total_steps += T_ep
+
                 # Lấy tất cả các thời điểm start_t với bước nhảy step_stride
-                for start_t in range(0, T, self.step_stride):
+                for start_t in range(0, T_ep, self.step_stride):
                     self.samples.append((file_idx, start_t))
 
-        print(f"[✓] Đã lập chỉ mục Dataset: {len(self.file_paths)} episodes, {total_steps} timesteps, {len(self.samples)} chunks (k={self.chunk_size}, stride={self.step_stride}).")
+        resample_info = f", đồng bộ {resampled_episodes} episodes rớt frame về 50Hz" if resampled_episodes > 0 else ""
+        print(f"[✓] Đã lập chỉ mục Dataset: {len(self.file_paths)} episodes, {total_steps} timesteps, {len(self.samples)} chunks (k={self.chunk_size}, stride={self.step_stride}{resample_info}).")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -76,66 +134,87 @@ class BimanualEpisodicDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         file_idx, start_t = self.samples[idx]
         fpath = self.file_paths[file_idx]
+        is_resampled = self.episode_resampled.get(file_idx, False)
 
         with h5py.File(fpath, "r") as f:
-            T = len(f["action"])
+            T_ep = self.episode_lengths[file_idx]
 
-            # 1. ĐỌC VÀ TIỀN XỬ LÝ ẢNH RGB-D TẠI THỜI ĐIỂM start_t
+            # Xác định frame camera tương ứng tại thời điểm start_t
+            if is_resampled:
+                cam_frame_idx = int(self.episode_frame_indices[file_idx][start_t])
+            else:
+                cam_frame_idx = start_t
+
+            # 1. ĐỌC VÀ TIỀN XỬ LÝ ẢNH RGB-D TẠI THỜI ĐIỂM cam_frame_idx
             obs_img = f["observations/images"]
             rgb_raw = None
             depth_raw = None
 
             if "chest_rgb" in obs_img and "chest_depth" in obs_img:
                 # Định dạng chuẩn theo DATA_FORMAT_SPECIFICATION.md
-                rgb_raw = obs_img["chest_rgb"][start_t]
-                depth_raw = obs_img["chest_depth"][start_t]
+                rgb_raw = obs_img["chest_rgb"][cam_frame_idx]
+                depth_raw = obs_img["chest_depth"][cam_frame_idx]
             elif "chest" in obs_img:
-                raw_chest = obs_img["chest"][start_t]
+                raw_chest = obs_img["chest"][cam_frame_idx]
                 if raw_chest.shape[-1] == 4:
                     rgb_raw = raw_chest[..., :3]
                     depth_raw = raw_chest[..., 3]
                 else:
                     rgb_raw = raw_chest
-                    # Nếu có dataset chest_depth riêng bên ngoài
                     if "chest_depth" in obs_img:
-                        depth_raw = obs_img["chest_depth"][start_t]
+                        depth_raw = obs_img["chest_depth"][cam_frame_idx]
             else:
-                # Thử tìm bất kỳ dataset ảnh nào trong images
                 first_key = list(obs_img.keys())[0]
-                rgb_raw = obs_img[first_key][start_t]
+                rgb_raw = obs_img[first_key][cam_frame_idx]
 
-            # Chuyển đổi thành tensor 4 kênh RGB-D
+            # Chuyển đổi thành tensor 4 kênh RGB-D (bảo toàn tỷ lệ khung hình 16:9)
             rgbd_tensor = preprocess_rgbd(
                 rgb_raw=rgb_raw,
                 depth_raw=depth_raw,
                 depth_min_m=self.depth_min_m,
                 depth_max_m=self.depth_max_m,
                 target_size=self.target_img_size,
+                preserve_aspect_ratio=True,
             )
 
             # 2. ĐỌC VÀ CHUẨN HÓA GÓC KHỚP qpos TẠI THỜI ĐIỂM start_t
-            raw_qpos = f["observations/qpos"][start_t].astype(np.float32)
-            norm_qpos = normalize_data(raw_qpos, self.stats["qpos_mean"], self.stats["qpos_std"])
+            if is_resampled:
+                norm_qpos = self.cached_qpos[file_idx][start_t]
+            else:
+                raw_qpos = f["observations/qpos"][start_t].astype(np.float32)
+                norm_qpos = normalize_data(raw_qpos, self.stats["qpos_mean"], self.stats["qpos_std"])
+
             qpos_tensor = torch.tensor(norm_qpos, dtype=torch.float32)
 
             # 3. ĐỌC VÀ CHUẨN HÓA CHUỖI HÀNH ĐỘNG ACTION CHUNK [start_t : start_t + chunk_size]
             end_t = start_t + self.chunk_size
             is_pad = np.zeros(self.chunk_size, dtype=bool)
 
-            if end_t <= T:
-                # Đủ 50 bước tương lai
-                raw_actions = f["action"][start_t:end_t].astype(np.float32)
+            if is_resampled:
+                actions_data = self.cached_actions[file_idx]
+                if end_t <= T_ep:
+                    norm_actions = actions_data[start_t:end_t]
+                else:
+                    available = actions_data[start_t:T_ep]
+                    num_available = len(available)
+                    pad_count = self.chunk_size - num_available
+                    last_act = available[-1:]
+                    padding = np.repeat(last_act, pad_count, axis=0)
+                    norm_actions = np.concatenate([available, padding], axis=0)
+                    is_pad[num_available:] = True
             else:
-                # Gần cuối episode: Lấy phần còn lại và lặp lại bước cuối cùng để làm đệm padding
-                available = f["action"][start_t:T].astype(np.float32)
-                num_available = len(available)
-                pad_count = self.chunk_size - num_available
-                last_act = available[-1:]
-                padding = np.repeat(last_act, pad_count, axis=0)
-                raw_actions = np.concatenate([available, padding], axis=0)
-                is_pad[num_available:] = True
+                if end_t <= T_ep:
+                    raw_actions = f["action"][start_t:end_t].astype(np.float32)
+                else:
+                    available = f["action"][start_t:T_ep].astype(np.float32)
+                    num_available = len(available)
+                    pad_count = self.chunk_size - num_available
+                    last_act = available[-1:]
+                    padding = np.repeat(last_act, pad_count, axis=0)
+                    raw_actions = np.concatenate([available, padding], axis=0)
+                    is_pad[num_available:] = True
+                norm_actions = normalize_data(raw_actions, self.stats["action_mean"], self.stats["action_std"])
 
-            norm_actions = normalize_data(raw_actions, self.stats["action_mean"], self.stats["action_std"])
             actions_tensor = torch.tensor(norm_actions, dtype=torch.float32)
             is_pad_tensor = torch.tensor(is_pad, dtype=torch.bool)
 

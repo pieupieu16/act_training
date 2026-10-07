@@ -92,9 +92,9 @@ def export_act_to_onnx(
     raw_model = model.module if hasattr(model, "module") else model
     raw_model.eval()
 
-    # Determine input dimensions from config or model attributes
-    img_height = getattr(raw_model.config, "img_height", 480) if hasattr(raw_model, "config") else 480
-    img_width = getattr(raw_model.config, "img_width", 640) if hasattr(raw_model, "config") else 640
+    # Determine input dimensions from config or model attributes (Chuẩn 16:9 RealSense 240x424)
+    img_height = getattr(raw_model.config, "img_height", 240) if hasattr(raw_model, "config") else 240
+    img_width = getattr(raw_model.config, "img_width", 424) if hasattr(raw_model, "config") else 424
     in_channels = getattr(raw_model.config, "in_channels", 4) if hasattr(raw_model, "config") else 4
     qpos_dim = getattr(raw_model.config, "qpos_dim", 16) if hasattr(raw_model, "config") else 16
     chunk_size = getattr(raw_model.config, "chunk_size", 50) if hasattr(raw_model, "config") else 50
