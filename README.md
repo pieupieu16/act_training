@@ -164,14 +164,14 @@ pip install -r requirements.txt
 ---
 
 ### 1. Lệnh chạy huấn luyện tiêu chuẩn (Recommended Training Command)
-Chạy huấn luyện mô hình ACT trên GPU 0 với cấu hình tối ưu 100 epochs, batch size 32, đánh giá và lưu checkpoint mỗi 10 epochs:
+Chạy huấn luyện mô hình ACT trên GPU 0 với cấu hình tối ưu 100 epochs, batch size 16 (hoặc 32 nếu VRAM lớn), tự động đánh giá và lưu checkpoint mỗi 10 epochs, đồng thời bật theo dõi qua **TensorBoard** và **Weights & Biases (WandB)**:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
-    --dataset_dir ../../OpenArm_MC/data_set/data_set \
+    --dataset_dir data_set/data_set \
     --output_dir checkpoints/act_openarm \
     --epochs 100 \
-    --batch_size 32 \
+    --batch_size 16 \
     --lr 1e-4 \
     --lr_backbone 1e-5 \
     --kl_weight 10.0 \
@@ -179,16 +179,24 @@ CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
     --val_split 0.15 \
     --eval_every 10 \
     --save_every 10 \
+    --use_tensorboard \
+    --use_wandb \
+    --wandb_project act-openarm \
     --device cuda
 ```
 
+> **💡 Gợi ý:**
+> - Nếu chỉ muốn giám sát cục bộ không dùng internet: Bỏ cờ `--use_wandb` và giữ `--use_tensorboard`.
+> - Nếu giám sát từ xa không cần mạng LAN / không cắm cáp: Giữ `--use_wandb` (sau khi chạy `wandb login`).
+> - Nếu GPU có VRAM khiêm tốn (<=6GB): Đặt `--batch_size 16`. Nếu GPU 16GB–24GB: Có thể tăng `--batch_size 32`.
+
 ### 2. Lệnh huấn luyện cơ bản hoặc chạy qua script entrypoint:
 ```bash
-# Chạy trực tiếp qua train.py:
-python train.py --dataset_dir data_set/data_set --output_dir checkpoints/act_openarm
+# Chạy trực tiếp qua train.py (với TensorBoard):
+python train.py --dataset_dir data_set/data_set --output_dir checkpoints/act_openarm --use_tensorboard
 
 # Chọn GPU cụ thể (ví dụ GPU 1):
-CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_dir checkpoints/act_openarm
+CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_dir checkpoints/act_openarm --use_tensorboard
 ```
 
 ### 3. Các siêu tham số quan trọng
@@ -198,7 +206,7 @@ CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_
 | `--dataset_dir` | `dataset/` | Thư mục chứa các file `.hdf5` |
 | `--output_dir` | `checkpoints/act_openarm` | Thư mục lưu checkpoint ONNX và normalization stats |
 | `--epochs` | `500` | Tổng số epochs huấn luyện |
-| `--batch_size` | `16` | Kích thước batch (GPU 16GB tối ưu ở 16, 24GB có thể dùng 32) |
+| `--batch_size` | `16` | Kích thước batch (GPU 6GB dùng 16, GPU >=16GB có thể dùng 32) |
 | `--chunk_size` | `50` | Độ dài cửa sổ hành động tương lai ($k = 50$ bước $\approx 1.0$ giây @ 50Hz) |
 | `--lr` | `1e-4` | Learning rate cho Transformer Decoder và CVAE Encoder |
 | `--lr_backbone` | `1e-5` | Learning rate nhỏ cho Conv1 4-Channel Adapter |
@@ -208,39 +216,42 @@ CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_
 | `--save_every` | `10` | Chu kỳ kiểm tra và lưu checkpoint (mặc định 10 epochs) |
 | `--save_pth` | `False` | (Tùy chọn) Lưu thêm file checkpoint PyTorch `.pth` |
 | `--save_logs` | `False` | (Tùy chọn) Lưu thêm file text `train.log`, `metrics.jsonl` |
-| `--use_tensorboard` | `False` | (Tùy chọn) Bật ghi nhật ký đồ thị TensorBoard |
+| `--use_tensorboard` | `False` | (Tùy chọn) Bật ghi nhật ký đồ thị TensorBoard vào `<output_dir>/tensorboard` |
+| `--use_wandb` | `False` | (Tùy chọn) Bật đồng bộ theo dõi trực tuyến lên cloud Weights & Biases |
+| `--wandb_project` | `act-openarm` | Tên dự án trên Weights & Biases |
 
 ---
 
-## 📈 Giám sát quá trình huấn luyện với TensorBoard
+## 📈 Giám sát quá trình huấn luyện
 
-Nếu bạn muốn ghi nhật ký đồ thị TensorBoard, hãy thêm cờ `--use_tensorboard` khi chạy lệnh huấn luyện:
-```bash
-CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
-    --dataset_dir data_set/data_set \
-    --output_dir checkpoints/act_openarm \
-    --epochs 100 \
-    --batch_size 32 \
-    --use_tensorboard \
-    --device cuda
-```
+### Cách 1: Giám sát trực quan với TensorBoard (Mạng nội bộ / SSH Tunnel)
 
-### 1. Khởi chạy TensorBoard:
-Mở một terminal mới trên server (hoặc tạo một phiên tmux riêng `tmux new -s act_tb`) và chạy:
+Khi bật cờ `--use_tensorboard`, hệ thống lưu log vào `checkpoints/act_openarm/tensorboard/`.
+
+#### Bước 1: Khởi chạy TensorBoard trên server
+Mở một terminal mới (hoặc trong phiên tmux `tmux new -s act_tb`):
 ```bash
 tensorboard --logdir checkpoints/act_openarm/tensorboard --port 6007
 ```
-*(Nếu chạy trong tmux, nhấn **`Ctrl + B`** rồi nhấn **`D`** để detach ra ngoài mà TensorBoard vẫn tiếp tục chạy).*
 
-### Bước 2: Mở đường hầm SSH từ máy cá nhân của bạn
-
-Mở một Terminal mới trên máy tính của bạn (máy laptop/PC bạn đang ngồi, không phải trên server) và chạy lệnh:
-
+#### Bước 2: Mở đường hầm SSH từ máy tính cá nhân
+Mở terminal trên máy tính của bạn và forward cổng 6007:
 ```bash
 ssh -N -L 6007:localhost:6007 toann@192.168.8.19
 ```
+Sau đó mở trình duyệt truy cập: `http://localhost:6007`
 
-Sau đó mở trình duyệt trên máy tính cá nhân và truy cập: `http://localhost:6007`
+### Cách 2: Giám sát từ xa qua Weights & Biases (Không cần cắm LAN / Wi-Fi)
+
+Khi bật cờ `--use_wandb`, hệ thống tự động đẩy toàn bộ metric (loss, lr, per-joint MAE) lên cloud wandb.ai:
+
+```bash
+# 1. Đăng nhập 1 lần duy nhất trên server:
+wandb login
+
+# 2. Xem trực tiếp biểu đồ mọi lúc mọi nơi qua điện thoại/laptop tại:
+# https://wandb.ai
+```
 
 ---
 
