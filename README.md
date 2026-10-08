@@ -96,6 +96,22 @@ python resample_dataset.py --input_dir data_set/data_set --output_dir data_set/d
 ```
 *(Lưu ý: Ngay cả khi bạn chưa chạy resample offline, DataLoader trong pipeline huấn luyện cũng được tích hợp sẵn cơ chế **On-the-fly Resampling**, tự động phát hiện và nội suy quỹ đạo về đúng 50Hz ($dt=0.02s$) để chuỗi chunk 50 bước luôn tương đương đúng 1.0 giây vật lý!)*
 
+### 3. Đẩy dữ liệu từ Máy thu thập / Robot lên Server Huấn luyện (Upload Dataset)
+Chạy các lệnh dưới đây trên **Terminal của máy cá nhân hoặc máy tính gắn trên robot** (nơi lưu các file `.hdf5` vừa quay xong):
+
+#### Cách 1: Dùng lệnh `rsync` (Khuyên dùng: Tốc độ cao, có hiển thị %, tự động truyền tiếp nếu đứt mạng)
+```bash
+# Đẩy toàn bộ thư mục data_set lên server huấn luyện:
+rsync -avzP path/to/local/data_set/ toann@192.168.8.19:/home/quan/code/OpenArm_ACT_Training/data_set/data_set/
+```
+*(Thay `path/to/local/data_set/` bằng đường dẫn thư mục chứa dataset trên máy bạn. Nếu bị rớt mạng giữa chừng, chỉ cần chạy lại lệnh, `rsync` sẽ tự động truyền tiếp các file còn dang dở).*
+
+#### Cách 2: Dùng lệnh `scp` (Đơn giản, sẵn có trên Linux / macOS / Windows PowerShell)
+```bash
+# Đẩy toàn bộ các file .hdf5 lên server:
+scp -r path/to/local/data_set/*.hdf5 toann@192.168.8.19:/home/quan/code/OpenArm_ACT_Training/data_set/data_set/
+```
+
 ---
 
 ## 🚀 Huấn luyện mô hình (Training)
@@ -152,7 +168,7 @@ Chạy huấn luyện mô hình ACT trên GPU 0 với cấu hình tối ưu 100 
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
-    --dataset_dir data_set/data_set \
+    --dataset_dir ../../OpenArm_MC/data_set/data_set \
     --output_dir checkpoints/act_openarm \
     --epochs 100 \
     --batch_size 32 \
@@ -271,7 +287,7 @@ Chạy các lệnh dưới đây trên **terminal của máy cá nhân hoặc m�
 ### Cách 1: Dùng lệnh `scp` (Đơn giản, sẵn có trên Linux / macOS / Windows PowerShell)
 ```bash
 # 1. Tải riêng file mô hình ONNX tốt nhất (khoảng ~108 MB):
-scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/best_checkpoint.onnx ./
+scp toann@192.168.8.19:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/best_checkpoint.onnx ./
 
 # 2. Tải file metadata JSON đi kèm:
 scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/best_checkpoint_metadata.json ./
