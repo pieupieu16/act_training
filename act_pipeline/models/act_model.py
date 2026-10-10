@@ -22,7 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from act_pipeline.config import ModelConfig
-from act_pipeline.models.backbone import RGBDResNetBackbone
+from act_pipeline.models.backbone import RGBDResNetBackbone, build_vision_backbone
 from act_pipeline.models.cvae import CVAEEncoder
 from act_pipeline.models.policy import TransformerPolicyDecoder
 
@@ -30,7 +30,7 @@ from act_pipeline.models.policy import TransformerPolicyDecoder
 class ACTPolicy(nn.Module):
     """
     Toàn bộ mô hình ACT cho robot OpenArm hai tay (16-DOF):
-    Ghép nối Backbone thị giác RGB-D, CVAE Latent Generator và Policy Decoder.
+    Ghép nối Backbone thị giác RGB-D (ConvNeXt-Nano / ResNet-18), CVAE Latent Generator và Policy Decoder.
     """
     def __init__(self, config: Optional[ModelConfig] = None):
         super().__init__()
@@ -44,8 +44,9 @@ class ACTPolicy(nn.Module):
         self.qpos_dim = config.qpos_dim
         self.latent_dim = config.latent_dim
 
-        # 1. THỊ GIÁC (Vision Backbone)
-        self.backbone = RGBDResNetBackbone(
+        # 1. THỊ GIÁC (Vision Backbone: ConvNeXt-Nano hoặc ResNet-18)
+        self.backbone = build_vision_backbone(
+            backbone_type=getattr(config, "backbone_type", "convnext_nano"),
             d_model=config.d_model,
             freeze_backbone=config.freeze_backbone,
             in_channels=config.in_channels,
@@ -188,14 +189,19 @@ class ACTPolicy(nn.Module):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen_params = total_params - trainable_params
 
+        # Thống kê tham số Backbone (ConvNeXt hoặc ResNet)
+        backbone_trainable = sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)
+        backbone_frozen = sum(p.numel() for p in self.backbone.parameters() if not p.requires_grad)
+
         summary = {
             "total_params": total_params,
             "trainable_params": trainable_params,
             "frozen_params": frozen_params,
             "trainable_pct": (trainable_params / total_params) * 100.0 if total_params > 0 else 0.0,
             "modules": {
-                "conv1_adapter": sum(p.numel() for p in self.backbone.conv1_adapter.parameters() if p.requires_grad),
-                "resnet_frozen": sum(p.numel() for p in [self.backbone.layer1, self.backbone.layer2, self.backbone.layer3, self.backbone.layer4] for p in p.parameters() if not p.requires_grad),
+                "backbone_type": getattr(self.config, "backbone_type", "convnext_nano"),
+                "backbone_trainable": backbone_trainable,
+                "backbone_frozen": backbone_frozen,
                 "img_proj": sum(p.numel() for p in self.backbone.img_proj.parameters() if p.requires_grad),
                 "qpos_proj": sum(p.numel() for p in self.qpos_proj.parameters() if p.requires_grad),
                 "cvae": sum(p.numel() for p in self.cvae.parameters() if p.requires_grad),

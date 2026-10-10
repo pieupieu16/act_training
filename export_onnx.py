@@ -113,7 +113,7 @@ def main():
     saved_cfg = checkpoint_data.get("config", {})
     model_cfg = ModelConfig(
         in_channels=saved_cfg.get("in_channels", 4),
-        backbone_type=saved_cfg.get("backbone_type", "resnet18"),
+        backbone_type=saved_cfg.get("backbone_type", "convnext_nano"),
         freeze_backbone=True,
         img_height=saved_cfg.get("img_height", 240),
         img_width=saved_cfg.get("img_width", 424),

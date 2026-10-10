@@ -148,3 +148,107 @@ class RGBDResNetBackbone(nn.Module):
         # 4. Làm phẳng thành chuỗi Visual Tokens: [B, d_model, H_feat, W_feat] -> [B, N_patches, d_model]
         visual_tokens = feat_with_pos.flatten(2).permute(0, 2, 1)
         return visual_tokens
+
+
+class RGBDConvNeXtBackbone(nn.Module):
+    """
+    Khối thị giác RGB-D sử dụng ConvNeXt-Nano cho mô hình ACT:
+    - Nhận vào ảnh 4 kênh [B, 4, H, W] (3 RGB + 1 Depth).
+    - Sử dụng ConvNeXt-Nano (timm) với in_chans=4, kernel lớn 7x7 và Inverted Bottleneck
+      giúp định vị hình học và biên vật thể trong không gian 3D vượt trội hơn ResNet-18.
+    - 1x1 Conv Image Projection: Chiếu 640 kênh đặc trưng về d_model (512).
+    - 2D Sinusoidal PE: Mã hóa tọa độ không gian 2D cho từng patch.
+    - Đầu ra: visual_tokens [B, N_patches, d_model] ([B, 91, 512] với ảnh 240x424).
+    """
+    def __init__(
+        self,
+        d_model: int = 512,
+        freeze_backbone: bool = True,
+        in_channels: int = 4,
+        model_name: str = "convnext_nano",
+        pretrained: bool = True,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.in_channels = in_channels
+        self.model_name = model_name
+
+        try:
+            import timm
+            self.backbone = timm.create_model(
+                model_name,
+                pretrained=pretrained,
+                in_chans=in_channels,
+            )
+            in_features = self.backbone.num_features
+        except Exception:
+            import timm
+            self.backbone = timm.create_model(
+                model_name,
+                pretrained=False,
+                in_chans=in_channels,
+            )
+            in_features = self.backbone.num_features
+
+        # Đóng băng backbone nếu freeze_backbone = True
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+            self.backbone.eval()
+
+        # 1x1 Conv Image Projection (Trainable)
+        self.img_proj = nn.Conv2d(in_features, d_model, kernel_size=1)
+
+        # 2D Sinusoidal Positional Encoding (Fixed)
+        self.pos_embed_2d = SinusoidalPositionEmbedding2D(d_model=d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Input:
+            x: [B, 4, H, W] - Ảnh 4 kênh RGB-D đã chuẩn hóa
+        Output:
+            visual_tokens: [B, N_patches, d_model]
+        """
+        # Trích xuất đặc trưng ConvNeXt-Nano
+        feat = self.backbone.forward_features(x)  # [B, 640, H_feat, W_feat]
+        
+        # Chiếu về d_model và thêm mã hóa vị trí 2D
+        proj_feat = self.img_proj(feat)           # [B, d_model, H_feat, W_feat]
+        pos = self.pos_embed_2d(proj_feat)         # [B, d_model, H_feat, W_feat]
+        feat_with_pos = proj_feat + pos
+
+        # Làm phẳng thành chuỗi Visual Tokens cho Transformer Decoder
+        visual_tokens = feat_with_pos.flatten(2).permute(0, 2, 1)  # [B, N_patches, d_model]
+        return visual_tokens
+
+
+def build_vision_backbone(
+    backbone_type: str = "convnext_nano",
+    d_model: int = 512,
+    freeze_backbone: bool = True,
+    in_channels: int = 4,
+) -> nn.Module:
+    """
+    Factory tạo Vision Backbone cho ACT.
+    Hỗ trợ 'convnext_nano' (mặc định SOTA) hoặc 'resnet18' (legacy).
+    """
+    if backbone_type in ["convnext_nano", "convnext", "convnext_tiny"]:
+        model_name = "convnext_nano" if backbone_type in ["convnext_nano", "convnext"] else "convnext_tiny"
+        return RGBDConvNeXtBackbone(
+            d_model=d_model,
+            freeze_backbone=freeze_backbone,
+            in_channels=in_channels,
+            model_name=model_name,
+        )
+    elif backbone_type == "resnet18":
+        return RGBDResNetBackbone(
+            d_model=d_model,
+            freeze_backbone=freeze_backbone,
+            in_channels=in_channels,
+        )
+    else:
+        raise ValueError(
+            f"backbone_type='{backbone_type}' không được hỗ trợ. "
+            f"Vui lòng chọn 'convnext_nano' hoặc 'resnet18'."
+        )
+

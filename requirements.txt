@@ -6,6 +6,7 @@
 # Core Deep Learning
 torch>=2.0.0
 torchvision>=0.15.0
+timm>=1.0.0
 
 # Scientific Computing & Data Processing
 numpy>=1.22.0

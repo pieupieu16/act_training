@@ -35,18 +35,19 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from act_pipeline.models.backbone import RGBDResNetBackbone
+from act_pipeline.models.backbone import RGBDResNetBackbone, RGBDConvNeXtBackbone, build_vision_backbone
 from act_pipeline.data.preprocess import preprocess_rgbd
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Kiểm tra khả năng phát hiện vật thể của ResNet-18 trong ACT")
+    parser = argparse.ArgumentParser(description="Kiểm tra khả năng phát hiện vật thể của Vision Backbone (ConvNeXt-Nano / ResNet-18) trong ACT")
     parser.add_argument("--episode", type=str, default=None, help="Đường dẫn file .hdf5 cần kiểm tra")
     parser.add_argument("--dataset_dir", type=str, default="data_set/data_set", help="Thư mục dataset chứa các file .hdf5")
     parser.add_argument("--step", type=int, default=50, help="Vị trí bước timestep trong episode (mặc định bước 50)")
     parser.add_argument("--image", type=str, default=None, help="Đường dẫn file ảnh thông thường nếu không dùng hdf5")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint .pth đã train (nếu không có sẽ dùng pretrained ImageNet)")
-    parser.add_argument("--output", type=str, default="resnet18_detection_check.png", help="Đường dẫn file ảnh xuất kết quả")
+    parser.add_argument("--backbone_type", type=str, default="convnext_nano", choices=["convnext_nano", "resnet18"], help="Loại mạng thị giác (mặc định: convnext_nano)")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint .pth đã train (nếu không có sẽ dùng pretrained)")
+    parser.add_argument("--output", type=str, default="vision_detection_check.png", help="Đường dẫn file ảnh xuất kết quả")
     parser.add_argument("--img_height", type=int, default=240, help="Chiều cao ảnh chuẩn hóa (mặc định 240)")
     parser.add_argument("--img_width", type=int, default=424, help="Chiều rộng ảnh chuẩn hóa (mặc định 424)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cpu hoặc cuda")
@@ -151,8 +152,20 @@ def main():
         depth_max_m=1.2,
     ).unsqueeze(0).to(device)  # [1, 4, H, W]
 
-    # 3. Khởi tạo Backbone ResNet-18
-    backbone = RGBDResNetBackbone(d_model=512, freeze_backbone=False, in_channels=4).to(device)
+    # 3. Khởi tạo Backbone (ConvNeXt-Nano hoặc ResNet-18)
+    backbone_type = args.backbone_type
+    if args.checkpoint and os.path.exists(args.checkpoint):
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        saved_cfg = ckpt.get("config", {})
+        if "backbone_type" in saved_cfg:
+            backbone_type = saved_cfg["backbone_type"]
+
+    backbone = build_vision_backbone(
+        backbone_type=backbone_type,
+        d_model=512,
+        freeze_backbone=False,
+        in_channels=4,
+    ).to(device)
 
     # Nạp checkpoint nếu có
     if args.checkpoint and os.path.exists(args.checkpoint):
@@ -171,21 +184,31 @@ def main():
         else:
             print("[!] Checkpoint không có tiền tố backbone, sử dụng trọng số mặc định.")
     else:
-        print("[i] Sử dụng trọng số ResNet-18 ImageNet chuẩn (Conv1 Depth adapter trung bình).")
+        print(f"[i] Sử dụng trọng số {backbone_type.upper()} ImageNet chuẩn.")
 
     backbone.eval()
 
     # 4. Trích xuất feature map từng tầng
     with torch.no_grad():
-        x = backbone.conv1_adapter(rgbd_tensor)
-        x = backbone.bn1(x)
-        x = backbone.relu(x)
-        x = backbone.maxpool(x)
-
-        feat_l1 = backbone.layer1(x)
-        feat_l2 = backbone.layer2(feat_l1)
-        feat_l3 = backbone.layer3(feat_l2)  # [1, 256, H/16, W/16]
-        feat_l4 = backbone.layer4(feat_l3)  # [1, 512, H/32, W/32]
+        if isinstance(backbone, RGBDConvNeXtBackbone):
+            stem_out = backbone.backbone.stem(rgbd_tensor)
+            s0 = backbone.backbone.stages[0](stem_out)
+            s1 = backbone.backbone.stages[1](s0)
+            feat_l3 = backbone.backbone.stages[2](s1)      # Stage 2: 16x (viền cạnh, cấu trúc không gian 3D)
+            feat_l4 = backbone.backbone.stages[3](feat_l3)  # Stage 3: 32x (ngữ nghĩa vật thể & gripper)
+            l3_name = "2. Stage 2 (Viền cạnh & Hình học không gian 16x)"
+            l4_name = "3. Stage 3 (Vị trí vật thể & Tay kẹp 32x)"
+        else:
+            x = backbone.conv1_adapter(rgbd_tensor)
+            x = backbone.bn1(x)
+            x = backbone.relu(x)
+            x = backbone.maxpool(x)
+            feat_l1 = backbone.layer1(x)
+            feat_l2 = backbone.layer2(feat_l1)
+            feat_l3 = backbone.layer3(feat_l2)
+            feat_l4 = backbone.layer4(feat_l3)
+            l3_name = "2. Layer 3 (Viền cạnh, hình học chi tiết)"
+            l4_name = "3. Layer 4 (Vùng chú ý phát hiện vật thể)"
 
     # 5. Chuyển đổi thành Heatmap
     heat_l3 = get_feature_activation_map(feat_l3)
@@ -209,28 +232,28 @@ def main():
 
     # 6. Vẽ biểu đồ 4 ô so sánh trực quan
     fig, axes = plt.subplots(2, 2, figsize=(14, 8))
-    fig.suptitle(f"Kiểm tra Đặc trưng Thị giác ResNet-18\n{info_str}", fontsize=13, fontweight="bold")
+    fig.suptitle(f"Kiểm tra Đặc trưng Thị giác {backbone_type.upper()}\n{info_str}", fontsize=13, fontweight="bold")
 
     # Ô 1: Ảnh gốc RGB
     axes[0, 0].imshow(rgb_resized)
     axes[0, 0].set_title("1. Ảnh Camera Gốc (RGB 240x424)", fontsize=11)
     axes[0, 0].axis("off")
 
-    # Ô 2: Heatmap Layer 3 (Đặc trưng viền, cấu trúc hình học vật thể)
+    # Ô 2: Heatmap Stage 2 / Layer 3 (Đặc trưng viền, cấu trúc hình học vật thể)
     im3 = axes[0, 1].imshow(heat_l3_resized, cmap="magma")
-    axes[0, 1].set_title("2. Layer 3 Activation (Viền cạnh, hình học chi tiết)", fontsize=11)
+    axes[0, 1].set_title(l3_name, fontsize=11)
     axes[0, 1].axis("off")
     fig.colorbar(im3, ax=axes[0, 1], fraction=0.046, pad=0.04)
 
-    # Ô 3: Heatmap Layer 4 (Đặc trưng ngữ nghĩa cao cấp - Vị trí vật & Tay kẹp)
+    # Ô 3: Heatmap Stage 3 / Layer 4 (Đặc trưng ngữ nghĩa cao cấp - Vị trí vật & Tay kẹp)
     im4 = axes[1, 0].imshow(heat_l4_resized, cmap="jet")
-    axes[1, 0].set_title("3. Layer 4 Activation (Vùng chú ý phát hiện vật thể)", fontsize=11)
+    axes[1, 0].set_title(l4_name, fontsize=11)
     axes[1, 0].axis("off")
     fig.colorbar(im4, ax=axes[1, 0], fraction=0.046, pad=0.04)
 
     # Ô 4: Heatmap phủ lên ảnh thật (Overlay)
     axes[1, 1].imshow(overlay_l4)
-    axes[1, 1].set_title("4. Overlay Layer 4 (Vùng Đỏ = Nơi ResNet-18 tập trung)", fontsize=11)
+    axes[1, 1].set_title(f"4. Overlay ({backbone_type.upper()}: Vùng Đỏ = Nơi tập trung)", fontsize=11)
     axes[1, 1].axis("off")
 
     plt.tight_layout()
