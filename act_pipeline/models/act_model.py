@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 Unified ACT Policy Architecture for Bimanual OpenArm (16-DOF) + Chest RGB-D
-Implements exact architecture specified in ACT_ARCHITECTURE.md:
-- 01 Chest Camera RGB-D [B, 4, 480, 640]
-- Conv1 4-Channel Adapter (Trainable)
-- ResNet-18 Layers 1..4 (Frozen)
-- 2D Sinusoidal PE (Fixed) -> 300 Visual Tokens [B, 300, 512]
+Vision Backbone: ConvNeXt-Nano (Pure-CNN SOTA)
+- 01 Chest Camera RGB-D [B, 4, 240, 424]
+- ConvNeXt-Nano Backbone (Frozen hoặc Fine-tuned)
+- 2D Sinusoidal PE (Fixed) -> Visual Tokens [B, 91, 512]
 - Joint State Projection Linear 16 -> 512
 - CVAE Transformer Encoder (2 Layers) + Latent Heads 512 -> 32
 - Latent Projection Linear 32 -> 512
-- Memory Tokens [B, 302, 512]
+- Memory Tokens [B, 93, 512]
 - 50 Action Queries + 1D Temporal Sinusoidal PE
 - Transformer Decoder (4 Layers)
 - Action Linear Head 512 -> 16
@@ -22,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from act_pipeline.config import ModelConfig
-from act_pipeline.models.backbone import RGBDResNetBackbone, build_vision_backbone
+from act_pipeline.models.backbone import build_vision_backbone, RGBDConvNeXtBackbone
 from act_pipeline.models.cvae import CVAEEncoder
 from act_pipeline.models.policy import TransformerPolicyDecoder
 
@@ -30,7 +29,7 @@ from act_pipeline.models.policy import TransformerPolicyDecoder
 class ACTPolicy(nn.Module):
     """
     Toàn bộ mô hình ACT cho robot OpenArm hai tay (16-DOF):
-    Ghép nối Backbone thị giác RGB-D (ConvNeXt-Nano / ResNet-18), CVAE Latent Generator và Policy Decoder.
+    Ghép nối Backbone thị giác RGB-D ConvNeXt-Nano, CVAE Latent Generator và Policy Decoder.
     """
     def __init__(self, config: Optional[ModelConfig] = None):
         super().__init__()
@@ -44,7 +43,7 @@ class ACTPolicy(nn.Module):
         self.qpos_dim = config.qpos_dim
         self.latent_dim = config.latent_dim
 
-        # 1. THỊ GIÁC (Vision Backbone: ConvNeXt-Nano hoặc ResNet-18)
+        # 1. THỊ GIÁC (Vision Backbone: ConvNeXt-Nano)
         self.backbone = build_vision_backbone(
             backbone_type=getattr(config, "backbone_type", "convnext_nano"),
             d_model=config.d_model,
@@ -189,7 +188,7 @@ class ACTPolicy(nn.Module):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen_params = total_params - trainable_params
 
-        # Thống kê tham số Backbone (ConvNeXt hoặc ResNet)
+        # Thống kê tham số Backbone ConvNeXt-Nano
         backbone_trainable = sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)
         backbone_frozen = sum(p.numel() for p in self.backbone.parameters() if not p.requires_grad)
 
