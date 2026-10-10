@@ -111,9 +111,16 @@ def main():
 
     # 3. Khởi tạo mô hình
     saved_cfg = checkpoint_data.get("config", {})
+    bb_type = saved_cfg.get("backbone_type", "convnext_nano")
+    if bb_type == "resnet18":
+        raise RuntimeError(
+            "[LỖI BẮT BUỘC] Không thể xuất ONNX: Checkpoint này được huấn luyện với ResNet-18 cũ. "
+            "Dự án đã loại bỏ hoàn toàn ResNet-18 và chuyển độc quyền sang ConvNeXt-Nano."
+        )
+
     model_cfg = ModelConfig(
         in_channels=saved_cfg.get("in_channels", 4),
-        backbone_type=saved_cfg.get("backbone_type", "resnet18"),
+        backbone_type="convnext_nano",
         freeze_backbone=True,
         img_height=saved_cfg.get("img_height", 240),
         img_width=saved_cfg.get("img_width", 424),

@@ -2,24 +2,23 @@
 # -*- coding: utf-8 -*-
 """
 Vision Backbone for ACT:
-- 4-Channel Conv1 Adapter (RGB + Depth), depth channel initialized as mean(w_RGB)
-- ResNet-18 (Layers 1..4) pretrained on ImageNet (Frozen)
-- 2D Sinusoidal Positional Encoding (Fixed)
-- 1x1 Conv Image Projection 512 -> d_model (512)
-- Produces 300 Visual Tokens [B, 300, d_model] for 480x640 input
+Độc quyền sử dụng ConvNeXt-Nano (Pure-CNN SOTA) cho dữ liệu RGB-D 4 kênh.
+- Nhận diện không gian 3D và biên cạnh vật thể sắc nét với kernel 7x7 và Inverted Bottleneck.
+- 1x1 Conv Image Projection 640 -> d_model (512).
+- 2D Sinusoidal Positional Encoding (Fixed).
+- Không có bất kỳ nhánh rẽ fallback sang ResNet; nếu thiếu ConvNeXt-Nano sẽ lập tức báo lỗi.
 """
 
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
 
 
 class SinusoidalPositionEmbedding2D(nn.Module):
     """
     2D Sinusoidal Positional Encoding cố định (không học - Fixed)
-    Mã hóa không gian 2D cho đặc trưng thị giác theo công thức DETR/ACT.
+    Mã hóa tọa độ không gian 2D cho từng patch đặc trưng theo công thức DETR/ACT.
     """
     def __init__(self, d_model: int = 512, temperature: float = 10000.0):
         super().__init__()
@@ -54,68 +53,61 @@ class SinusoidalPositionEmbedding2D(nn.Module):
         return pos
 
 
-class RGBDResNetBackbone(nn.Module):
+class RGBDConvNeXtBackbone(nn.Module):
     """
-    Khối thị giác RGB-D cho mô hình ACT:
+    Khối thị giác RGB-D sử dụng ConvNeXt-Nano cho mô hình ACT:
     - Nhận vào ảnh 4 kênh [B, 4, H, W] (3 RGB + 1 Depth).
-    - Conv1 4-Channel Adapter: Khởi tạo RGB từ ImageNet, kênh Depth khởi tạo từ trung bình w_RGB.
-    - ResNet-18 Layers 1..4: Đóng băng (Frozen) để chống overfitting trên tập demo nhỏ.
-    - 1x1 Conv Image Projection: Chiếu 512 kênh về d_model (512).
-    - 2D Sinusoidal PE: Cộng vào đặc trưng trước khi làm phẳng (flatten).
-    - Đầu ra: visual_tokens [B, N_patches, d_model] (với 480x640 -> 15x20 = 300 tokens).
+    - Sử dụng ConvNeXt-Nano (timm) với in_chans=4, kernel lớn 7x7 và Inverted Bottleneck
+      giúp định vị hình học và biên vật thể trong không gian 3D vượt trội.
+    - 1x1 Conv Image Projection: Chiếu 640 kênh đặc trưng về d_model (512).
+    - 2D Sinusoidal PE: Mã hóa tọa độ không gian 2D cho từng patch.
+    - Đầu ra: visual_tokens [B, N_patches, d_model] ([B, 91, 512] với ảnh 240x424).
     """
     def __init__(
         self,
         d_model: int = 512,
         freeze_backbone: bool = True,
         in_channels: int = 4,
+        model_name: str = "convnext_nano",
+        pretrained: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
         self.in_channels = in_channels
+        self.model_name = model_name
 
-        # Tải trọng số ResNet-18 pretrained ImageNet
-        resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        pretrained_conv1 = resnet.conv1
+        # Kiểm tra bắt buộc thư viện timm
+        try:
+            import timm
+        except ImportError as exc:
+            raise ImportError(
+                "[LỖI BẮT BUỘC] Không tìm thấy thư viện 'timm' để khởi tạo ConvNeXt-Nano! "
+                "Hệ thống không hỗ trợ ResNet-18. Vui lòng cài đặt: pip install timm>=1.0.0"
+            ) from exc
 
-        # Tạo Conv1 4-Channel Adapter (Trainable)
-        self.conv1_adapter = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=pretrained_conv1.out_channels,
-            kernel_size=pretrained_conv1.kernel_size,
-            stride=pretrained_conv1.stride,
-            padding=pretrained_conv1.padding,
-            bias=False,
-        )
+        # Khởi tạo ConvNeXt-Nano từ timm
+        try:
+            self.backbone = timm.create_model(
+                model_name,
+                pretrained=pretrained,
+                in_chans=in_channels,
+            )
+            in_features = self.backbone.num_features
+        except Exception as exc:
+            raise RuntimeError(
+                f"[LỖI BẮT BUỘC] Không thể tải/khởi tạo mô hình '{model_name}' với {in_channels} kênh: {exc}. "
+                f"Kiểm tra lại kết nối mạng hoặc trọng số cache của timm."
+            ) from exc
 
-        # Khởi tạo trọng số Conv1 Adapter:
-        # Kênh 0, 1, 2 (RGB) giữ nguyên trọng số ImageNet
-        # Kênh 3 (Depth) khởi tạo bằng mean của 3 kênh RGB: mean(w_RGB)
-        with torch.no_grad():
-            self.conv1_adapter.weight[:, :3, :, :] = pretrained_conv1.weight
-            if in_channels > 3:
-                depth_init = pretrained_conv1.weight.mean(dim=1, keepdim=True)
-                self.conv1_adapter.weight[:, 3:4, :, :] = depth_init
-
-        # ResNet-18 Layers 1..4
-        self.bn1 = resnet.bn1
-        self.relu = resnet.relu
-        self.maxpool = resnet.maxpool
-        self.layer1 = resnet.layer1
-        self.layer2 = resnet.layer2
-        self.layer3 = resnet.layer3
-        self.layer4 = resnet.layer4
-
-        # Đóng băng các tầng ResNet18 nếu freeze_backbone = True
+        # Đóng băng backbone nếu freeze_backbone = True
         if freeze_backbone:
-            for module in [self.bn1, self.layer1, self.layer2, self.layer3, self.layer4]:
-                for param in module.parameters():
-                    param.requires_grad = False
-                module.eval()
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+            self.backbone.eval()
 
         # 1x1 Conv Image Projection (Trainable)
-        self.img_proj = nn.Conv2d(512, d_model, kernel_size=1)
-        
+        self.img_proj = nn.Conv2d(in_features, d_model, kernel_size=1)
+
         # 2D Sinusoidal Positional Encoding (Fixed)
         self.pos_embed_2d = SinusoidalPositionEmbedding2D(d_model=d_model)
 
@@ -124,27 +116,40 @@ class RGBDResNetBackbone(nn.Module):
         Input:
             x: [B, 4, H, W] - Ảnh 4 kênh RGB-D đã chuẩn hóa
         Output:
-            visual_tokens: [B, N_patches, d_model] (Ví dụ: [B, 300, 512] khi H=480, W=640)
+            visual_tokens: [B, N_patches, d_model]
         """
-        B = x.shape[0]
-
-        # 1. Đi qua 4-Channel Conv1 Adapter
-        out = self.conv1_adapter(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.maxpool(out)
-
-        # 2. Đi qua ResNet-18 Layers 1..4 (Frozen)
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        feat = self.layer4(out)  # [B, 512, H_feat, W_feat]
-
-        # 3. 1x1 Conv Projection + 2D Sinusoidal PE
+        # Trích xuất đặc trưng ConvNeXt-Nano
+        feat = self.backbone.forward_features(x)  # [B, 640, H_feat, W_feat]
+        
+        # Chiếu về d_model và thêm mã hóa vị trí 2D
         proj_feat = self.img_proj(feat)           # [B, d_model, H_feat, W_feat]
         pos = self.pos_embed_2d(proj_feat)         # [B, d_model, H_feat, W_feat]
         feat_with_pos = proj_feat + pos
 
-        # 4. Làm phẳng thành chuỗi Visual Tokens: [B, d_model, H_feat, W_feat] -> [B, N_patches, d_model]
-        visual_tokens = feat_with_pos.flatten(2).permute(0, 2, 1)
+        # Làm phẳng thành chuỗi Visual Tokens cho Transformer Decoder
+        visual_tokens = feat_with_pos.flatten(2).permute(0, 2, 1)  # [B, N_patches, d_model]
         return visual_tokens
+
+
+def build_vision_backbone(
+    backbone_type: str = "convnext_nano",
+    d_model: int = 512,
+    freeze_backbone: bool = True,
+    in_channels: int = 4,
+) -> nn.Module:
+    """
+    Factory tạo Vision Backbone cho ACT.
+    Độc quyền hỗ trợ ConvNeXt-Nano. Mọi yêu cầu kiến trúc khác (bao gồm resnet18) đều lập tức báo lỗi.
+    """
+    if backbone_type != "convnext_nano":
+        raise ValueError(
+            f"[LỖI NGHIÊM TRỌNG] Dự án đã loại bỏ hoàn toàn ResNet-18 và chỉ chấp nhận duy nhất 'convnext_nano'. "
+            f"Giá trị cung cấp không hợp lệ: '{backbone_type}'."
+        )
+
+    return RGBDConvNeXtBackbone(
+        d_model=d_model,
+        freeze_backbone=freeze_backbone,
+        in_channels=in_channels,
+        model_name="convnext_nano",
+    )

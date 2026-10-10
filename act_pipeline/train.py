@@ -7,7 +7,7 @@ Bimanual OpenArm (16-DOF: 2 arms x 8 motors) + 01 Chest RGB-D Camera
 Tính năng chính:
 - Tự động dò và tính toán Thống kê chuẩn hóa (Mean & Std) cho 16 khớp
 - Phân chia Train/Validation tập demo chống Data Leakage
-- Tự động đóng băng ResNet-18 Layers 1..4, tối ưu Conv1 4-Channel Adapter
+- Tự động đóng băng ConvNeXt-Nano Backbone trích xuất đặc trưng thị giác 3D
 - Hỗ trợ Mixed Precision FP16 (torch.cuda.amp) tăng tốc trên GPU NVIDIA
 - Gradient Clipping chống hiện tượng bùng nổ Gradient trong Transformer
 - Quản lý Checkpoint toàn diện (Best, Latest, Periodic, Deployment weights)
@@ -230,7 +230,7 @@ def train_pipeline(args):
     # 6. Khởi tạo Mô hình ACT
     model_cfg = ModelConfig(
         in_channels=4,
-        backbone_type="resnet18",
+        backbone_type=getattr(args, "backbone_type", "convnext_nano"),
         freeze_backbone=not args.unfreeze_backbone,
         img_height=args.img_height,
         img_width=args.img_width,
@@ -251,13 +251,15 @@ def train_pipeline(args):
 
     # Hiển thị cấu trúc tham số theo bảng ACT_ARCHITECTURE.md
     param_summary = model.get_parameter_summary()
+    bb_type = param_summary['modules'].get('backbone_type', 'convnext_nano')
     logger.info("-" * 80)
     logger.info(f"📊 BẢNG PHÂN BỔ THAM SỐ MÔ HÌNH (Trainable vs Frozen):")
+    logger.info(f"   + Vision Backbone            : CONVNEXT-NANO")
     logger.info(f"   + Tổng số tham số (Total)    : {param_summary['total_params']:,}")
     logger.info(f"   + 🔥 Tham số học được (Train): {param_summary['trainable_params']:,} ({param_summary['trainable_pct']:.2f}%)")
     logger.info(f"   + ❄️ Tham số đóng băng (Freeze): {param_summary['frozen_params']:,}")
-    logger.info(f"   + Conv1 4-Channel Adapter    : {param_summary['modules']['conv1_adapter']:,}")
-    logger.info(f"   + ResNet-18 Layers 1..4      : {param_summary['modules']['resnet_frozen']:,} (Frozen)")
+    logger.info(f"   + ConvNeXt-Nano Trọng số     : {param_summary['modules'].get('backbone_frozen', 0):,} (Frozen)")
+    logger.info(f"   + Image 1x1 Projection       : {param_summary['modules'].get('img_proj', 0):,}")
     logger.info(f"   + CVAE Transformer Encoder   : {param_summary['modules']['cvae']:,}")
     logger.info(f"   + Transformer Policy Decoder : {param_summary['modules']['policy_decoder']:,}")
     logger.info("-" * 80)
@@ -628,7 +630,8 @@ def parse_args():
     parser.add_argument("--latent_dim", type=int, default=32, help="Số chiều vector ẩn z của CVAE")
     parser.add_argument("--cvae_layers", type=int, default=2, help="Số layers Transformer Encoder của CVAE")
     parser.add_argument("--decoder_layers", type=int, default=4, help="Số layers Transformer Decoder của Policy")
-    parser.add_argument("--unfreeze_backbone", action="store_true", help="Nếu đặt cờ này, sẽ fine-tune toàn bộ ResNet18 thay vì đóng băng")
+    parser.add_argument("--backbone_type", type=str, default="convnext_nano", choices=["convnext_nano"], help="Kiến trúc mạng trích xuất đặc trưng thị giác (độc quyền convnext_nano)")
+    parser.add_argument("--unfreeze_backbone", action="store_true", help="Nếu đặt cờ này, sẽ fine-tune toàn bộ Backbone thay vì đóng băng")
 
     # Hàm mất mát Loss
     parser.add_argument("--kl_weight", type=float, default=10.0, help="Trọng số beta cho KL Divergence Loss")

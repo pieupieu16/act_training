@@ -13,7 +13,7 @@ from typing import List, Tuple, Optional
 class ModelConfig:
     # Vision Backbone (16:9 RealSense Camera 240x424)
     in_channels: int = 4            # RGB (3) + Depth (1)
-    backbone_type: str = "resnet18" # ResNet-18 (Layers 1..4 frozen)
+    backbone_type: str = "convnext_nano" # ConvNeXt-Nano (Pure-CNN SOTA spatial feature extractor)
     freeze_backbone: bool = True    # Đóng băng ImageNet pretrained backbone
     img_height: int = 240           # Chuẩn tỷ lệ 16:9 của camera RealSense (H=240, W=424)
     img_width: int = 424
