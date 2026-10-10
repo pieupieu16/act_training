@@ -21,6 +21,7 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 
 def preprocess_rgbd(
     rgb_raw: np.ndarray,
     depth_raw: Optional[np.ndarray] = None,
+    object_mask_raw: Optional[np.ndarray] = None,
     depth_min_m: float = 0.2,
     depth_max_m: float = 1.2,
     target_size: Optional[Tuple[int, int]] = None,
@@ -67,8 +68,13 @@ def preprocess_rgbd(
         default_val = (0.6 - depth_min_m) / (depth_max_m - depth_min_m)
         depth_norm = torch.full((1, H, W), fill_value=default_val, dtype=torch.float32)
 
-    # 3. Ghép thành 4 kênh: [3 RGB, 1 Depth]
+    # 3. Ghép RGB, depth, và tùy chọn mask vật thể vào cùng phép resize.
     rgbd_tensor = torch.cat([rgb_norm, depth_norm], dim=0) # [4, H, W]
+    if object_mask_raw is not None:
+        if object_mask_raw.shape != (H, W):
+            raise ValueError("object_mask_raw phải có shape [H,W] khớp RGB.")
+        mask_tensor = torch.from_numpy(np.asarray(object_mask_raw, dtype=np.float32)).unsqueeze(0)
+        rgbd_tensor = torch.cat([rgbd_tensor, mask_tensor], dim=0)
 
     # 4. Resize bảo toàn tỷ lệ khung hình (Aspect Ratio Preserving / Letterboxing)
     if target_size is not None and (H, W) != target_size:

@@ -37,6 +37,7 @@ from act_pipeline.models.act_model import ACTPolicy
 from act_pipeline.data.dataset import BimanualEpisodicDataset
 from act_pipeline.data.normalization import load_norm_stats, unnormalize_data, normalize_data
 from act_pipeline.data.preprocess import preprocess_rgbd
+from act_pipeline.data.object_mask import green_box_mask
 from act_pipeline.utils.checkpoint import CheckpointManager
 from act_pipeline.utils.temporal_ensemble import TemporalEnsemblePolicy
 
@@ -125,6 +126,8 @@ def simulate_episode_rollout(
     device: torch.device,
     ensemble_m: float = 0.01,
     chunk_size: int = 50,
+    target_img_size: Tuple[int, int] = (240, 424),
+    object_mask: bool = False,
 ) -> Dict[str, Any]:
     """
     Giả lập Rollout liên tục theo thời gian thực (50Hz) trên 1 file Episode:
@@ -170,7 +173,10 @@ def simulate_episode_rollout(
             rgb_t = raw_rgb[cam_idx] if raw_rgb.ndim == 4 else raw_rgb[cam_idx][..., :3]
             depth_t = raw_depth[cam_idx] if raw_depth is not None else None
             
-            rgbd_tensor = preprocess_rgbd(rgb_t, depth_t, preserve_aspect_ratio=True).unsqueeze(0).to(device) # [1, 4, H, W]
+            rgbd_tensor = preprocess_rgbd(rgb_t, depth_t,
+                                          object_mask_raw=green_box_mask(rgb_t) if object_mask else None,
+                                          target_size=target_img_size,
+                                          preserve_aspect_ratio=True).unsqueeze(0).to(device)
 
             # 2. Tiền xử lý qpos
             norm_qpos = normalize_data(qpos_seq[t], stats["qpos_mean"], stats["qpos_std"])
@@ -299,7 +305,7 @@ def eval_pipeline(args):
         # 2. Khởi tạo mô hình PyTorch
         saved_cfg = checkpoint_data.get("config", {})
         model_cfg = ModelConfig(
-            in_channels=4,
+            in_channels=saved_cfg.get("in_channels", 5 if saved_cfg.get("object_mask") else 4),
             backbone_type="resnet18",
             freeze_backbone=True,
             img_height=saved_cfg.get("img_height", 240),
@@ -324,7 +330,13 @@ def eval_pipeline(args):
         print("[✓] Đã nạp thành công 100% trọng số mô hình PyTorch.")
 
     # 3. Tạo DataLoader Đánh giá
-    eval_files = sorted(glob.glob(os.path.join(args.dataset_dir, "*.hdf5")))
+    eval_files = sorted(glob.glob(os.path.join(args.dataset_dir, "*.hdf5")) +
+                        glob.glob(os.path.join(args.dataset_dir, "*.h5")))
+    if args.split_json:
+        with open(args.split_json, "r", encoding="utf-8") as f:
+            split = json.load(f)
+        val_set = {os.path.abspath(path) for path in split["val"]}
+        eval_files = [path for path in eval_files if os.path.abspath(path) in val_set]
     if len(eval_files) == 0:
         print(f"[X] LỖI: Không tìm thấy file HDF5 nào trong: {args.dataset_dir}")
         sys.exit(1)
@@ -337,6 +349,7 @@ def eval_pipeline(args):
         target_img_size=(model_cfg.img_height, model_cfg.img_width),
         target_hz=50.0,
         auto_resample=True,
+        object_mask=(model_cfg.in_channels == 5),
     )
     eval_loader = DataLoader(
         eval_dataset,
@@ -375,6 +388,8 @@ def eval_pipeline(args):
         device=device,
         ensemble_m=args.ensemble_m,
         chunk_size=model_cfg.chunk_size,
+        target_img_size=(model_cfg.img_height, model_cfg.img_width),
+        object_mask=(model_cfg.in_channels == 5),
     )
 
     # Ghi biểu đồ sai số 16 khớp (Per-Joint MAE Figure) vào TensorBoard
@@ -451,6 +466,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Đánh giá mô hình ACT Bimanual OpenArm")
     parser.add_argument("--checkpoint_path", type=str, default="checkpoints/act_openarm/best_checkpoint.pth", help="Đường dẫn file checkpoint .pth")
     parser.add_argument("--dataset_dir", type=str, default="dataset/real_towel_folding", help="Thư mục chứa các file .hdf5 kiểm thử")
+    parser.add_argument("--split_json", type=str, default=None,
+                        help="Chỉ đánh giá validation episodes từ episode_split.json")
     parser.add_argument("--output_dir", type=str, default="evaluation_results", help="Thư mục xuất báo cáo đánh giá")
     parser.add_argument("--batch_size", type=int, default=16, help="Kích thước batch đánh giá")
     parser.add_argument("--num_workers", type=int, default=2, help="Số worker nạp dữ liệu")

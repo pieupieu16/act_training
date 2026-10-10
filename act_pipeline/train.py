@@ -22,6 +22,7 @@ import math
 import random
 import argparse
 import glob
+import json
 from typing import Dict, List, Optional, Tuple, Any
 
 # Đảm bảo mã hóa UTF-8 an toàn trên Windows và Linux
@@ -63,8 +64,8 @@ def evaluate(
     loss_type: str = "l1",
 ) -> Dict[str, float]:
     """
-    Vòng lặp đánh giá trên tập Validation:
-    Tính toán Total Loss, Reconstruction Loss, KL Loss và sai số trung bình từng khớp (Per-Joint MAE).
+    Vòng lặp validation theo đúng đường deploy (CVAE prior z=0).
+    KL bằng 0 vì không truyền action thật vào encoder ở bước đánh giá.
     """
     model.eval()
     total_loss = 0.0
@@ -83,9 +84,8 @@ def evaluate(
             actions = batch["actions"].to(device, non_blocking=True)
             is_pad = batch["is_pad"].to(device, non_blocking=True)
 
-            pred_actions, mu, logvar = model(
-                image=image, qpos=qpos, actions=actions, is_pad=is_pad
-            )
+            # Validation must match deployment: the CVAE prior uses z=0.
+            pred_actions, mu, logvar = model(image=image, qpos=qpos, actions=None)
 
             loss_dict = model.compute_loss(
                 pred_actions=pred_actions,
@@ -122,11 +122,27 @@ def evaluate(
     }
 
 
+def load_initial_weights(model: nn.Module, checkpoint_path: str, device: torch.device) -> None:
+    """Load a matching ACT checkpoint, allowing only the RGB-D to RGB-D-mask adapter change."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state = checkpoint.get("model_state_dict", checkpoint)
+    key = "backbone.conv1_adapter.weight"
+    if key in state:
+        source = state[key]
+        target = model.state_dict()[key]
+        if source.shape[1] == 4 and target.shape[1] == 5 and source.shape[0] == target.shape[0] and source.shape[2:] == target.shape[2:]:
+            expanded = torch.zeros_like(target)
+            expanded[:, :4] = source
+            state[key] = expanded
+    model.load_state_dict(state, strict=True)
+
+
 def train_pipeline(args):
     """
     Pipeline huấn luyện hoàn chỉnh cho ACT Policy
     """
     # 1. Cấu hình thiết bị và seed
+    args.in_channels = 5 if args.object_mask else 4
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu")
     os.makedirs(args.output_dir, exist_ok=True)
@@ -160,20 +176,46 @@ def train_pipeline(args):
     logger.info("=" * 80)
 
     # 3. Quét danh sách file HDF5 và chia Train/Validation
-    all_files = sorted(glob.glob(os.path.join(args.dataset_dir, "*.hdf5")))
+    all_files = sorted(map(os.path.abspath,
+                           glob.glob(os.path.join(args.dataset_dir, "*.hdf5")) +
+                           glob.glob(os.path.join(args.dataset_dir, "*.h5"))))
     if len(all_files) == 0:
         logger.error(f"[X] LỖI: Không tìm thấy file .hdf5 nào trong: {args.dataset_dir}")
         sys.exit(1)
 
-    # Xáo trộn file ngẫu nhiên để chia train/val
-    random.shuffle(all_files)
-    num_val = max(1, int(len(all_files) * args.val_split))
-    val_files = sorted(all_files[:num_val])
-    train_files = sorted(all_files[num_val:])
+    if len(all_files) < 2:
+        raise ValueError("Cần ít nhất 2 episodes để tách train/validation theo episode.")
+    split_path = os.path.join(args.output_dir, "episode_split.json")
+    if os.path.exists(split_path):
+        with open(split_path, "r", encoding="utf-8") as f:
+            split = json.load(f)
+        train_files = split["train"]
+        val_files = split["val"]
+        if set(train_files + val_files) != set(all_files) or set(train_files) & set(val_files):
+            raise ValueError(f"Dataset đã thay đổi so với {split_path}; dùng output_dir mới cho run mới.")
+    else:
+        random.shuffle(all_files)
+        num_val = min(len(all_files) - 1, max(1, int(len(all_files) * args.val_split)))
+        val_files = sorted(all_files[:num_val])
+        train_files = sorted(all_files[num_val:])
+        with open(split_path, "w", encoding="utf-8") as f:
+            json.dump({"train": train_files, "val": val_files}, f, indent=2)
+
+    correction_files = []
+    if args.correction_dir:
+        correction_files = sorted(map(os.path.abspath,
+                                      glob.glob(os.path.join(args.correction_dir, "*.hdf5")) +
+                                      glob.glob(os.path.join(args.correction_dir, "*.h5"))))
+        if set(correction_files) & set(val_files):
+            raise ValueError("Correction episodes không được trùng validation episodes.")
+        if not correction_files:
+            raise ValueError(f"Không tìm thấy correction episodes tại {args.correction_dir}")
+    training_files = train_files + correction_files * args.correction_repeat
 
     logger.info(f"[*] Tổng số Episodes tìm thấy: {len(all_files)}")
     logger.info(f"    - Tập Huấn luyện (Train) : {len(train_files)} episodes")
     logger.info(f"    - Tập Đánh giá (Val)     : {len(val_files)} episodes")
+    logger.info(f"    - Correction (chỉ train): {len(correction_files)} episodes, lặp {args.correction_repeat} lần")
 
     # 4. Tính toán Thống kê chuẩn hóa (chỉ tính trên train_files để tránh rò rỉ dữ liệu)
     stats_path = os.path.join(args.output_dir, "dataset_stats.pkl")
@@ -188,7 +230,7 @@ def train_pipeline(args):
     # 5. Khởi tạo Dataset & DataLoader
     auto_resample_flag = not getattr(args, "no_auto_resample", False)
     train_dataset = BimanualEpisodicDataset(
-        file_paths=train_files,
+        file_paths=training_files,
         stats=stats,
         chunk_size=args.chunk_size,
         step_stride=args.step_stride,
@@ -197,6 +239,7 @@ def train_pipeline(args):
         depth_max_m=args.depth_max_m,
         target_hz=getattr(args, "target_hz", 50.0),
         auto_resample=auto_resample_flag,
+        object_mask=args.object_mask,
     )
     val_dataset = BimanualEpisodicDataset(
         file_paths=val_files,
@@ -208,6 +251,7 @@ def train_pipeline(args):
         depth_max_m=args.depth_max_m,
         target_hz=getattr(args, "target_hz", 50.0),
         auto_resample=auto_resample_flag,
+        object_mask=args.object_mask,
     )
 
     train_loader = DataLoader(
@@ -229,7 +273,7 @@ def train_pipeline(args):
 
     # 6. Khởi tạo Mô hình ACT
     model_cfg = ModelConfig(
-        in_channels=4,
+        in_channels=args.in_channels,
         backbone_type="resnet18",
         freeze_backbone=not args.unfreeze_backbone,
         img_height=args.img_height,
@@ -248,6 +292,11 @@ def train_pipeline(args):
         depth_max_m=args.depth_max_m,
     )
     model = ACTPolicy(config=model_cfg).to(device)
+    if args.init_checkpoint and args.resume:
+        raise ValueError("Chỉ dùng một trong --init_checkpoint hoặc --resume.")
+    if args.init_checkpoint:
+        load_initial_weights(model, args.init_checkpoint, device)
+        logger.info(f"[✓] Đã nạp trọng số từ {args.init_checkpoint}; optimizer và scheduler khởi tạo mới.")
 
     # Hiển thị cấu trúc tham số theo bảng ACT_ARCHITECTURE.md
     param_summary = model.get_parameter_summary()
@@ -331,7 +380,7 @@ def train_pipeline(args):
             best_val_loss = state.get("metrics", {}).get("best_val_loss", float("inf"))
             logger.info(f"[✓] Đã phục hồi thành công. Tiếp tục huấn luyện từ Epoch {start_epoch}...")
         else:
-            logger.warning(f"[!] Không tìm thấy checkpoint resume tại '{args.resume}'. Bắt đầu huấn luyện mới.")
+            raise FileNotFoundError(f"Không tìm thấy checkpoint resume tại '{args.resume}'.")
 
     # 11. VÒNG LẶP HUẤN LUYỆN CHÍNH THỨC
     logger.info(f"\n[*] BẮT ĐẦU VÒNG LẶP HUẤN LUYỆN (EPOCHS: {start_epoch} -> {args.epochs})...")
@@ -601,11 +650,19 @@ def train_pipeline(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Huấn luyện mô hình ACT Bimanual OpenArm RGB-D")
+    parser.add_argument("--preset", choices=["default", "pick_place_low_vram"], default="default",
+                        help="Preset cho tác vụ một vật, một đích; có thể ghi đè từng tham số")
     
     # Dữ liệu & Đường dẫn
     parser.add_argument("--dataset_dir", type=str, default="dataset/real_towel_folding", help="Đường dẫn thư mục chứa các file .hdf5")
     parser.add_argument("--output_dir", type=str, default="checkpoints/act_openarm", help="Thư mục lưu trữ checkpoints và log files")
     parser.add_argument("--resume", type=str, default=None, help="Đường dẫn checkpoint để khôi phục hoặc 'auto' để tìm checkpoint mới nhất")
+    parser.add_argument("--init_checkpoint", type=str, default=None,
+                        help="Nạp trọng số từ checkpoint cũ để fine-tune; khởi tạo optimizer mới")
+    parser.add_argument("--correction_dir", type=str, default=None,
+                        help="Thư mục episode HDF5 đã correction; chỉ đưa vào tập train")
+    parser.add_argument("--correction_repeat", type=int, default=1,
+                        help="Số lần lấy mẫu correction episodes trong mỗi epoch")
     
     # Vòng lặp huấn luyện
     parser.add_argument("--epochs", type=int, default=500, help="Tổng số epochs huấn luyện")
@@ -639,6 +696,8 @@ def parse_args():
     parser.add_argument("--img_width", type=int, default=424, help="Chiều rộng ảnh RGB-D (mặc định 424 cho chuẩn 16:9 RealSense)")
     parser.add_argument("--depth_min_m", type=float, default=0.2, help="Khoảng cách bàn tối thiểu (m)")
     parser.add_argument("--depth_max_m", type=float, default=1.2, help="Khoảng cách bàn tối đa (m)")
+    parser.add_argument("--object_mask", action="store_true",
+                        help="Thêm mask màu hộp xanh làm kênh ảnh thứ 5, chạy CPU không tốn VRAM detector")
     parser.add_argument("--step_stride", type=int, default=1, help="Bước nhảy lấy mẫu start_t trong episode")
     parser.add_argument("--target_hz", type=float, default=50.0, help="Tần số lấy mẫu/điều khiển chuẩn (mặc định: 50.0 Hz = 20ms)")
     parser.add_argument("--no_auto_resample", action="store_true", help="Tắt tự động lấy mẫu lại đồng đều 50Hz khi phát hiện rớt frame/jitter")
@@ -669,7 +728,19 @@ def parse_args():
     parser.add_argument("--wandb_project", type=str, default="act-openarm", help="Tên project trên WandB")
     parser.add_argument("--wandb_entity", type=str, default=None, help="Tên entity trên WandB")
 
+    preset_args, _ = parser.parse_known_args()
+    if preset_args.preset == "pick_place_low_vram":
+        parser.set_defaults(
+            batch_size=8, d_model=256, nheads=4, dim_feedforward=1024,
+            decoder_layers=2, cvae_layers=1, latent_dim=16,
+            chunk_size=10, step_stride=2, kl_weight=1.0,
+            img_height=240, img_width=320,
+            lr_backbone=1e-4,
+            save_pth=True, no_onnx=True,
+        )
     args = parser.parse_args()
+    if args.correction_repeat < 1:
+        parser.error("--correction_repeat phải >= 1")
     args.use_amp = not args.no_amp
     return args
 

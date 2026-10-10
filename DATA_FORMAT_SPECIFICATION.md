@@ -3,6 +3,8 @@
 **Mô hình**: ACT (Action Chunking with Transformers)  
 **Phần cứng áp dụng**: Robot Bimanual OpenArm (16-DOF: 2 tay x [7 khớp xoay + 1 kẹp Gripper]) + **01 Camera trước ngực RGB-D (Chest RGB-D)**
 
+> **Bổ sung cho dữ liệu pick-place tháng 10/2026:** episode mẫu có RGB/depth **640×480 (4:3)**, `gripper_unit=stroke_m`, và `action` trùng hoàn toàn `qpos`. Pipeline pick-place dùng input 320×240 để giữ tỷ lệ ảnh; chạy `prepare_pick_place.py` để lấy action từ `joint_commands` và bỏ đoạn đầu chưa có lệnh. Các ví dụ 240×424 và 16:9 bên dưới là cấu hình legacy, không được dùng để ép méo ảnh 4:3. Cần `h5py>=3.16` để đọc file gốc được tạo bằng HDF5 2.0.
+
 ---
 
 ## 1. TỔNG QUAN

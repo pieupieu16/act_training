@@ -1,20 +1,6 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ACT (Action Chunking with Transformers) Pipeline for Bimanual OpenArm (16-DOF) RGB-D
-"""
+"""OpenArm ACT package. Heavy training dependencies are imported on demand."""
 
-from act_pipeline.config import ModelConfig, TrainConfig, EvalConfig
-from act_pipeline.models.act_model import ACTPolicy
-try:
-    from act_pipeline.data.dataset import BimanualEpisodicDataset
-except ImportError:
-    BimanualEpisodicDataset = None
-from act_pipeline.data.preprocess import preprocess_rgbd
-from act_pipeline.data.normalization import compute_norm_stats, save_norm_stats, load_norm_stats
-from act_pipeline.utils.logger import MetricLogger
-from act_pipeline.utils.checkpoint import CheckpointManager
-from act_pipeline.utils.temporal_ensemble import TemporalEnsemblePolicy
+from importlib import import_module
 
 __all__ = [
     "ModelConfig",
@@ -30,3 +16,26 @@ __all__ = [
     "CheckpointManager",
     "TemporalEnsemblePolicy",
 ]
+
+_MODULES = {
+    "ModelConfig": "act_pipeline.config",
+    "TrainConfig": "act_pipeline.config",
+    "EvalConfig": "act_pipeline.config",
+    "ACTPolicy": "act_pipeline.models.act_model",
+    "BimanualEpisodicDataset": "act_pipeline.data.dataset",
+    "preprocess_rgbd": "act_pipeline.data.preprocess",
+    "compute_norm_stats": "act_pipeline.data.normalization",
+    "save_norm_stats": "act_pipeline.data.normalization",
+    "load_norm_stats": "act_pipeline.data.normalization",
+    "MetricLogger": "act_pipeline.utils.logger",
+    "CheckpointManager": "act_pipeline.utils.checkpoint",
+    "TemporalEnsemblePolicy": "act_pipeline.utils.temporal_ensemble",
+}
+
+
+def __getattr__(name):
+    if name not in _MODULES:
+        raise AttributeError(name)
+    value = getattr(import_module(_MODULES[name]), name)
+    globals()[name] = value
+    return value

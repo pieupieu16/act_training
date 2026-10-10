@@ -16,6 +16,7 @@ from torch.utils.data import Dataset
 import h5py
 
 from act_pipeline.data.preprocess import preprocess_rgbd
+from act_pipeline.data.object_mask import green_box_mask
 from act_pipeline.data.normalization import normalize_data
 from act_pipeline.data.resample import extract_timestamps, compute_resampling_plan, resample_signals
 
@@ -41,6 +42,7 @@ class BimanualEpisodicDataset(Dataset):
         depth_max_m: float = 1.2,
         target_hz: float = 50.0,
         auto_resample: bool = True,
+        object_mask: bool = False,
     ):
         super().__init__()
         self.file_paths = sorted(file_paths)
@@ -55,6 +57,7 @@ class BimanualEpisodicDataset(Dataset):
         self.depth_max_m = depth_max_m
         self.target_hz = target_hz
         self.auto_resample = auto_resample
+        self.object_mask = object_mask
 
         self.samples: List[Tuple[int, int]] = [] # (file_idx, start_t)
         self.episode_lengths: List[int] = []
@@ -171,6 +174,7 @@ class BimanualEpisodicDataset(Dataset):
             rgbd_tensor = preprocess_rgbd(
                 rgb_raw=rgb_raw,
                 depth_raw=depth_raw,
+                object_mask_raw=green_box_mask(rgb_raw) if self.object_mask else None,
                 depth_min_m=self.depth_min_m,
                 depth_max_m=self.depth_max_m,
                 target_size=self.target_img_size,

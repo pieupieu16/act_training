@@ -35,6 +35,7 @@ dataset/
 data_set/
 *.h5
 *.hdf5
+*.hdf5.partial
 *.zarr
 
 # Checkpoints & Model weights (Do not track heavy weight files)

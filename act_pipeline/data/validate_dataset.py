@@ -165,8 +165,8 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
                 elif abs(aspect_ratio - (4.0 / 3.0)) < 0.05:
                     res.info["aspect_type"] = "4:3"
                     res.add_warning(
-                        f"Ảnh có tỷ lệ 4:3 ({W_img}x{H_img}) thay vì 16:9 (240x424). "
-                        f"Cần đảm bảo config pipeline trùng khớp để tránh méo hình học!"
+                        f"Ảnh có tỷ lệ 4:3 ({W_img}x{H_img}); dùng target 240x320 "
+                        f"hoặc giữ tỷ lệ khi resize để tránh méo hình học."
                     )
                 else:
                     res.add_warning(f"Tỷ lệ ảnh không chuẩn: {W_img}x{H_img} (AR: {aspect_ratio:.2f}:1)")
@@ -202,6 +202,11 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
                 res.add_error("Phát hiện giá trị NaN trong '/action'")
             if np.isinf(action_sample).any():
                 res.add_error("Phát hiện giá trị Inf trong '/action'")
+            if qpos_sample.shape == action_sample.shape and np.array_equal(qpos_sample, action_sample):
+                res.add_error(
+                    "'/action' trùng hoàn toàn '/observations/qpos'; policy sẽ học lặp lại trạng thái. "
+                    "Kiểm tra /joint_commands hoặc nguồn lệnh điều khiển thật."
+                )
 
             # Kiểm tra góc khớp có nằm trong phạm vi cơ học an toàn
             for j_idx in range(16):
@@ -245,7 +250,8 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
 
 
 def validate_dataset_directory(dataset_dir: str, expected_hz: float = 50.0) -> Tuple[int, int, List[ValidationResult]]:
-    files = sorted(glob.glob(os.path.join(dataset_dir, "*.hdf5")))
+    files = sorted(glob.glob(os.path.join(dataset_dir, "*.hdf5")) +
+                   glob.glob(os.path.join(dataset_dir, "*.h5")))
     # Loại trừ các file đang ghi dở .partial.hdf5
     files = [f for f in files if not f.endswith(".partial.hdf5")]
 

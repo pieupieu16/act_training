@@ -1,5 +1,7 @@
 # 🤖 OpenArm ACT Training Pipeline (Action Chunking with Transformers)
 
+Xem [kế hoạch train tác vụ một vật, một đích cố định](PICK_PLACE_PLAN.md) để dùng preset ACT gọn, train YOLO11n khi có nhãn và thu correction để fine-tune offline.
+
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)

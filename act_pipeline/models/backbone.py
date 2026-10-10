@@ -73,6 +73,7 @@ class RGBDResNetBackbone(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.in_channels = in_channels
+        self.freeze_backbone = freeze_backbone
 
         # Tải trọng số ResNet-18 pretrained ImageNet
         resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
@@ -96,6 +97,8 @@ class RGBDResNetBackbone(nn.Module):
             if in_channels > 3:
                 depth_init = pretrained_conv1.weight.mean(dim=1, keepdim=True)
                 self.conv1_adapter.weight[:, 3:4, :, :] = depth_init
+            if in_channels > 4:
+                self.conv1_adapter.weight[:, 4:, :, :] = 0.0
 
         # ResNet-18 Layers 1..4
         self.bn1 = resnet.bn1
@@ -118,6 +121,15 @@ class RGBDResNetBackbone(nn.Module):
         
         # 2D Sinusoidal Positional Encoding (Fixed)
         self.pos_embed_2d = SinusoidalPositionEmbedding2D(d_model=d_model)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_backbone:
+            # model.train() is called each epoch; keep pretrained BatchNorm
+            # statistics fixed as well as the frozen parameters.
+            for module in (self.bn1, self.layer1, self.layer2, self.layer3, self.layer4):
+                module.eval()
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

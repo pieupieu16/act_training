@@ -10,7 +10,7 @@ torchvision>=0.15.0
 # Scientific Computing & Data Processing
 numpy>=1.22.0
 scipy>=1.10.0
-h5py>=3.8.0
+h5py>=3.16.0
 opencv-python>=4.7.0
 Pillow>=9.5.0
 
