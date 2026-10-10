@@ -25,7 +25,7 @@ OpenArm_ACT_Training/
 │   │   ├── act_model.py               # ACT Policy tổng hợp
 │   │   ├── cvae.py                    # CVAE Encoder (phân phối tiềm ẩn z)
 │   │   ├── policy.py                  # Transformer Decoder (dự đoán 50 bước tương lai)
-│   │   └── backbone.py                # ResNet-18 4 kênh RGB-D Feature Extractor
+│   │   └── backbone.py                # ConvNeXt-Nano (SOTA Pure-CNN) & ResNet-18 RGB-D Feature Extractor
 │   └── utils/                         # Tiện ích logging & checkpoints
 │       ├── checkpoint.py              # Quản lý lưu/khôi phục weights
 │       ├── logger.py                  # Logging đa kênh (Console, Logfile, TensorBoard, WandB)
@@ -216,6 +216,8 @@ CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_
 | `--save_every` | `10` | Chu kỳ kiểm tra và lưu checkpoint (mặc định 10 epochs) |
 | `--save_pth` | `False` | (Tùy chọn) Lưu thêm file checkpoint PyTorch `.pth` |
 | `--save_logs` | `False` | (Tùy chọn) Lưu thêm file text `train.log`, `metrics.jsonl` |
+| `--backbone_type` | `convnext_nano` | Kiến trúc mạng trích xuất thị giác (`convnext_nano` hoặc `resnet18`) |
+| `--unfreeze_backbone` | `False` | (Tùy chọn) Mở khóa để fine-tune toàn bộ trọng số Backbone |
 | `--use_tensorboard` | `False` | (Tùy chọn) Bật ghi nhật ký đồ thị TensorBoard vào `<output_dir>/tensorboard` |
 | `--use_wandb` | `False` | (Tùy chọn) Bật đồng bộ theo dõi trực tuyến lên cloud Weights & Biases |
 | `--wandb_project` | `act-openarm` | Tên dự án trên Weights & Biases |
