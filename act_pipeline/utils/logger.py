@@ -376,8 +376,12 @@ class MetricLogger:
         line = (
             f"Epoch [{epoch:4d}/{total_epochs:4d}] "
             f"| Train Loss: {train_metrics.get('loss', 0.0):.4f} "
-            f"(L1: {train_metrics.get('l1', 0.0):.4f}, KL: {train_metrics.get('kl', 0.0):.4f}) "
+            f"(L1: {train_metrics.get('l1', 0.0):.4f}, KL: {train_metrics.get('kl', 0.0):.4f}"
         )
+        if "attn" in train_metrics and train_metrics["attn"] > 0:
+            vis_pct = train_metrics.get("vis_ratio", 0.0) * 100.0
+            line += f", Attn: {train_metrics['attn']:.4f} [{vis_pct:.1f}% vis]"
+        line += ") "
 
         if val_metrics is not None:
             line += (

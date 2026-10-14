@@ -36,7 +36,7 @@ class BimanualEpisodicDataset(Dataset):
         stats: Dict[str, np.ndarray],
         chunk_size: int = 50,
         step_stride: int = 1,
-        target_img_size: Optional[Tuple[int, int]] = (240, 424),
+        target_img_size: Optional[Tuple[int, int]] = (480, 640),
         depth_min_m: float = 0.2,
         depth_max_m: float = 1.2,
         target_hz: float = 50.0,
@@ -145,37 +145,9 @@ class BimanualEpisodicDataset(Dataset):
             else:
                 cam_frame_idx = start_t
 
-            # 1. ĐỌC VÀ TIỀN XỬ LÝ ẢNH RGB-D TẠI THỜI ĐIỂM cam_frame_idx
+            # 1. ĐỌC VÀ TIỀN XỬ LÝ ẢNH RGB-D TẠI THỜI ĐIỂM start_t
             obs_img = f["observations/images"]
-            rgb_raw = None
-            depth_raw = None
-
-            if "chest_rgb" in obs_img and "chest_depth" in obs_img:
-                # Định dạng chuẩn theo DATA_FORMAT_SPECIFICATION.md
-                rgb_raw = obs_img["chest_rgb"][cam_frame_idx]
-                depth_raw = obs_img["chest_depth"][cam_frame_idx]
-            elif "chest" in obs_img:
-                raw_chest = obs_img["chest"][cam_frame_idx]
-                if raw_chest.shape[-1] == 4:
-                    rgb_raw = raw_chest[..., :3]
-                    depth_raw = raw_chest[..., 3]
-                else:
-                    rgb_raw = raw_chest
-                    if "chest_depth" in obs_img:
-                        depth_raw = obs_img["chest_depth"][cam_frame_idx]
-            else:
-                first_key = list(obs_img.keys())[0]
-                rgb_raw = obs_img[first_key][cam_frame_idx]
-
-            # Chuyển đổi thành tensor 4 kênh RGB-D (bảo toàn tỷ lệ khung hình 16:9)
-            rgbd_tensor = preprocess_rgbd(
-                rgb_raw=rgb_raw,
-                depth_raw=depth_raw,
-                depth_min_m=self.depth_min_m,
-                depth_max_m=self.depth_max_m,
-                target_size=self.target_img_size,
-                preserve_aspect_ratio=True,
-            )
+            rgbd_tensor = self._extract_rgbd(obs_img, cam_frame_idx)
 
             # 2. ĐỌC VÀ CHUẨN HÓA GÓC KHỚP qpos TẠI THỜI ĐIỂM start_t
             if is_resampled:
@@ -218,9 +190,41 @@ class BimanualEpisodicDataset(Dataset):
             actions_tensor = torch.tensor(norm_actions, dtype=torch.float32)
             is_pad_tensor = torch.tensor(is_pad, dtype=torch.bool)
 
-        return {
-            "image": rgbd_tensor,      # [4, H, W]
+        sample_dict = {
+            "image": rgbd_tensor,       # [4, H, W]
             "qpos": qpos_tensor,        # [16]
             "actions": actions_tensor,  # [chunk_size, 16]
             "is_pad": is_pad_tensor,    # [chunk_size]
         }
+
+        return sample_dict
+
+    def _extract_rgbd(self, obs_img, frame_idx: int) -> torch.Tensor:
+        """Trích xuất và tiền xử lý ảnh 4 kênh RGB-D cho một frame bất kỳ."""
+        rgb_raw = None
+        depth_raw = None
+
+        if "chest_rgb" in obs_img and "chest_depth" in obs_img:
+            rgb_raw = obs_img["chest_rgb"][frame_idx]
+            depth_raw = obs_img["chest_depth"][frame_idx]
+        elif "chest" in obs_img:
+            raw_chest = obs_img["chest"][frame_idx]
+            if raw_chest.shape[-1] == 4:
+                rgb_raw = raw_chest[..., :3]
+                depth_raw = raw_chest[..., 3]
+            else:
+                rgb_raw = raw_chest
+                if "chest_depth" in obs_img:
+                    depth_raw = obs_img["chest_depth"][frame_idx]
+        else:
+            first_key = list(obs_img.keys())[0]
+            rgb_raw = obs_img[first_key][frame_idx]
+
+        return preprocess_rgbd(
+            rgb_raw=rgb_raw,
+            depth_raw=depth_raw,
+            depth_min_m=self.depth_min_m,
+            depth_max_m=self.depth_max_m,
+            target_size=self.target_img_size,
+            preserve_aspect_ratio=True,
+        )

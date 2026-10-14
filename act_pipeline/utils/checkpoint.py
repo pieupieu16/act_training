@@ -76,14 +76,14 @@ class CheckpointManager:
         is_best: bool = False,
         save_periodic: bool = False,
         save_onnx: bool = True,
-        save_pth: bool = False,
-        save_periodic_onnx: bool = False,
+        save_pth: bool = True,
+        save_periodic_onnx: bool = True,
         opset_version: int = 18,
     ) -> Dict[str, str]:
         """
         Lưu checkpoint mô hình ACT.
-        Theo cấu hình mặc định tinh gọn, chỉ lưu duy nhất best_checkpoint.onnx
-        và best_checkpoint_metadata.json (cùng dataset_stats.pkl) để triển khai trực tiếp.
+        Mặc định lưu đầy đủ cả định dạng PyTorch (.pth) và ONNX (.onnx)
+        cho các checkpoint định kỳ và best checkpoint.
         """
         saved_paths = {}
 

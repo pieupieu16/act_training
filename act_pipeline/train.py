@@ -29,6 +29,9 @@ if hasattr(sys.stdout, "reconfigure") and getattr(sys.stdout, "encoding", None) 
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure") and getattr(sys.stderr, "encoding", None) != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 import numpy as np
 import torch
@@ -41,6 +44,7 @@ from act_pipeline.data.dataset import BimanualEpisodicDataset
 from act_pipeline.data.normalization import compute_norm_stats, save_norm_stats, load_norm_stats
 from act_pipeline.utils.logger import MetricLogger
 from act_pipeline.utils.checkpoint import CheckpointManager
+from act_pipeline.utils.early_stopping import EarlyStopping
 from act_pipeline.utils.tb_visualizer import plot_per_joint_mae
 
 
@@ -140,12 +144,20 @@ def train_pipeline(args):
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         config_dict=vars(args),
-        save_log_file=getattr(args, "save_logs", False),
-        save_metrics_jsonl=getattr(args, "save_logs", False),
-        save_config_json=getattr(args, "save_logs", False),
+        save_log_file=getattr(args, "save_logs", True),
+        save_metrics_jsonl=getattr(args, "save_logs", True),
+        save_config_json=getattr(args, "save_logs", True),
     )
     logger.setup_custom_scalars_layout()
     checkpoint_mgr = CheckpointManager(checkpoint_dir=args.output_dir)
+    early_stopper = None
+    if getattr(args, "early_stop", True):
+        early_stopper = EarlyStopping(
+            patience=getattr(args, "early_stop_patience", 10),
+            min_delta=getattr(args, "early_stop_min_delta", 0.001),
+            target_loss=getattr(args, "early_stop_target_loss", 0.0),
+            metric_name=getattr(args, "early_stop_metric", "train_loss"),
+        )
 
     logger.info("=" * 80)
     logger.info("   🚀 KHỞI ĐỘNG PIPELINE HUẤN LUYỆN ACT - BIMANUAL OPENARM (16-DOF) RGB-D")
@@ -157,6 +169,10 @@ def train_pipeline(args):
     logger.info(f"[*] Kích thước Batch    : {args.batch_size}")
     logger.info(f"[*] Tốc độ học (LR)     : {args.lr} (Backbone: {args.lr_backbone})")
     logger.info(f"[*] Mixed Precision     : {'BẬT (FP16 AMP)' if args.use_amp and device.type == 'cuda' else 'TẮT'}")
+    logger.info(
+        f"[*] Early Stopping      : "
+        f"{'BẬT (Patience: ' + str(early_stopper.patience) + ' epochs, Min Delta: ' + str(early_stopper.min_delta) + ', Metric: ' + early_stopper.metric_name + ')' if early_stopper else 'TẮT'}"
+    )
     logger.info("=" * 80)
 
     # 3. Quét danh sách file HDF5 và chia Train/Validation
@@ -246,6 +262,11 @@ def train_pipeline(args):
         qpos_dim=args.qpos_dim,
         depth_min_m=args.depth_min_m,
         depth_max_m=args.depth_max_m,
+        use_attn_loss=getattr(args, "use_attn_loss", True),
+        lambda_attn=getattr(args, "lambda_attn", 0.1),
+        attn_tau=getattr(args, "attn_tau", 0.6),
+        attn_focus_weight=getattr(args, "attn_focus_weight", 1.0),
+        attn_bg_weight=getattr(args, "attn_bg_weight", 1.0),
     )
     model = ACTPolicy(config=model_cfg).to(device)
 
@@ -346,6 +367,10 @@ def train_pipeline(args):
         train_loss_accum = 0.0
         train_recon_accum = 0.0
         train_kl_accum = 0.0
+        train_attn_accum = 0.0
+        train_attn_focus_accum = 0.0
+        train_attn_bg_accum = 0.0
+        train_vis_ratio_accum = 0.0
         batch_count = 0
 
         for step_idx, batch in enumerate(train_loader):
@@ -358,10 +383,26 @@ def train_pipeline(args):
             optimizer.zero_grad(set_to_none=True)
 
             # Chạy Mixed Precision (FP16)
+            return_aux = getattr(args, "use_attn_loss", True)
             with torch.amp.autocast("cuda", enabled=(args.use_amp and device.type == "cuda")):
-                pred_actions, mu, logvar = model(
-                    image=image, qpos=qpos, actions=actions, is_pad=is_pad
-                )
+                if return_aux:
+                    pred_actions, mu, logvar, aux_data = model(
+                        image=image,
+                        qpos=qpos,
+                        actions=actions,
+                        is_pad=is_pad,
+                        return_aux=True,
+                    )
+                else:
+                    pred_actions, mu, logvar = model(
+                        image=image,
+                        qpos=qpos,
+                        actions=actions,
+                        is_pad=is_pad,
+                        return_aux=False,
+                    )
+                    aux_data = None
+
                 loss_dict = model.compute_loss(
                     pred_actions=pred_actions,
                     actions=actions,
@@ -370,6 +411,11 @@ def train_pipeline(args):
                     logvar=logvar,
                     kl_weight=args.kl_weight,
                     loss_type=args.loss_type,
+                    aux_data=aux_data,
+                    lambda_attn=getattr(args, "lambda_attn", 0.1),
+                    attn_focus_weight=getattr(args, "attn_focus_weight", 1.0),
+                    attn_bg_weight=getattr(args, "attn_bg_weight", 1.0),
+                    attn_tau=getattr(args, "attn_tau", 0.6),
                 )
                 loss = loss_dict["loss"]
 
@@ -386,21 +432,25 @@ def train_pipeline(args):
             train_loss_accum += loss.item()
             train_recon_accum += loss_dict["recon_loss"].item()
             train_kl_accum += loss_dict["kl_loss"].item()
+            train_attn_accum += loss_dict.get("attn_loss", torch.tensor(0.0)).item()
+            train_attn_focus_accum += loss_dict.get("attn_focus_loss", torch.tensor(0.0)).item()
+            train_attn_bg_accum += loss_dict.get("attn_bg_loss", torch.tensor(0.0)).item()
+            train_vis_ratio_accum += loss_dict.get("attn_vis_ratio", torch.tensor(0.0)).item()
             batch_count += 1
 
             # Ghi nhận step metrics định kỳ
             if global_step % args.log_every_steps == 0:
                 current_lr = scheduler.get_last_lr()[-1]
-                logger.log_metrics(
-                    {
-                        "step_loss": loss.item(),
-                        "step_recon": loss_dict["recon_loss"].item(),
-                        "step_kl": loss_dict["kl_loss"].item(),
-                        "lr": current_lr,
-                    },
-                    step=global_step,
-                    prefix="train/",
-                )
+                step_metrics = {
+                    "step_loss": loss.item(),
+                    "step_recon": loss_dict["recon_loss"].item(),
+                    "step_kl": loss_dict["kl_loss"].item(),
+                    "lr": current_lr,
+                }
+                if "attn_loss" in loss_dict and loss_dict["attn_loss"].item() > 0:
+                    step_metrics["step_attn_loss"] = loss_dict["attn_loss"].item()
+                    step_metrics["step_attn_vis_ratio"] = loss_dict["attn_vis_ratio"].item()
+                logger.log_metrics(step_metrics, step=global_step, prefix="train/")
 
         # Cập nhật Learning Rate Scheduler theo Epoch
         scheduler.step()
@@ -409,18 +459,25 @@ def train_pipeline(args):
         avg_train_loss = train_loss_accum / max(batch_count, 1)
         avg_train_recon = train_recon_accum / max(batch_count, 1)
         avg_train_kl = train_kl_accum / max(batch_count, 1)
+        avg_train_attn = train_attn_accum / max(batch_count, 1)
+        avg_train_focus = train_attn_focus_accum / max(batch_count, 1)
+        avg_train_bg = train_attn_bg_accum / max(batch_count, 1)
+        avg_train_vis_ratio = train_vis_ratio_accum / max(batch_count, 1)
         current_lr = scheduler.get_last_lr()[-1]
 
-        logger.log_metrics(
-            {
-                "loss": avg_train_loss,
-                "l1": avg_train_recon,
-                "kl": avg_train_kl,
-                "lr": current_lr,
-            },
-            step=epoch,
-            prefix="train_epoch/",
-        )
+        epoch_metrics = {
+            "loss": avg_train_loss,
+            "l1": avg_train_recon,
+            "kl": avg_train_kl,
+            "lr": current_lr,
+        }
+        if getattr(args, "use_attn_loss", True):
+            epoch_metrics["attn_loss"] = avg_train_attn
+            epoch_metrics["attn_focus_loss"] = avg_train_focus
+            epoch_metrics["attn_bg_loss"] = avg_train_bg
+            epoch_metrics["attn_vis_ratio"] = avg_train_vis_ratio
+
+        logger.log_metrics(epoch_metrics, step=epoch, prefix="train_epoch/")
 
         # Ghi histogram trọng số và gradient cho các tham số có requires_grad=True
         tb_hist_every = getattr(args, "tb_histogram_every", 10)
@@ -525,7 +582,13 @@ def train_pipeline(args):
         logger.log_epoch_summary(
             epoch=epoch,
             total_epochs=args.epochs,
-            train_metrics={"loss": avg_train_loss, "l1": avg_train_recon, "kl": avg_train_kl},
+            train_metrics={
+                "loss": avg_train_loss,
+                "l1": avg_train_recon,
+                "kl": avg_train_kl,
+                "attn": avg_train_attn,
+                "vis_ratio": avg_train_vis_ratio,
+            },
             val_metrics=val_metrics,
             lr=current_lr,
             elapsed_sec=epoch_elapsed,
@@ -554,14 +617,70 @@ def train_pipeline(args):
             is_best=is_best,
             save_periodic=save_periodic,
             save_onnx=not args.no_onnx,
-            save_pth=getattr(args, "save_pth", False),
-            save_periodic_onnx=args.onnx_periodic,
+            save_pth=getattr(args, "save_pth", True),
+            save_periodic_onnx=getattr(args, "onnx_periodic", True),
             opset_version=args.onnx_opset,
         )
 
         if is_best:
             best_onnx = saved_files.get("best_onnx", "")
             logger.info(f"   🏆 ĐẠT KỶ LỤC MỚI! Best Val Loss: {best_val_loss:.4f} -> Đã lưu: {best_onnx}")
+
+        # 14. Kiểm tra điều kiện Dừng sớm (Early Stopping: Plateau detection)
+        if early_stopper is not None:
+            metric_choice = getattr(args, "early_stop_metric", "train_loss")
+            if metric_choice == "val_loss":
+                if val_metrics is not None and "loss" in val_metrics:
+                    should_stop, stop_msg = early_stopper.step(val_metrics["loss"], epoch=epoch)
+                else:
+                    should_stop, stop_msg = False, ""
+            else:
+                should_stop, stop_msg = early_stopper.step(avg_train_loss, epoch=epoch)
+
+            # In thông báo tiến độ theo dõi nếu loss đang chững lại
+            if not should_stop and early_stopper.counter > 0 and early_stopper.counter % 2 == 0:
+                logger.info(f"   [i] Early Stopping: {stop_msg}")
+
+            if should_stop:
+                logger.info("=" * 80)
+                logger.info(f"   🛑 KÍCH HOẠT DỪNG SỚM (EARLY STOPPING) TẠI EPOCH {epoch}!")
+                logger.info(f"   [✓] Lý do: {stop_msg}")
+
+                # Chạy validation lần cuối nếu epoch này chưa chạy để chốt checkpoint tốt nhất
+                if val_metrics is None:
+                    logger.info("   [*] Thực hiện đánh giá Validation lần cuối để chốt mô hình tốt nhất...")
+                    val_metrics = evaluate(
+                        model=model,
+                        dataloader=val_loader,
+                        device=device,
+                        kl_weight=args.kl_weight,
+                        loss_type=args.loss_type,
+                    )
+                    if val_metrics["loss"] < best_val_loss:
+                        best_val_loss = val_metrics["loss"]
+                        checkpoint_metrics["val_loss"] = best_val_loss
+                        checkpoint_metrics["val_l1"] = val_metrics["l1"]
+                        checkpoint_mgr.save_checkpoint(
+                            epoch=epoch,
+                            global_step=global_step,
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            scaler=scaler,
+                            stats=stats,
+                            config=vars(args),
+                            metrics=checkpoint_metrics,
+                            is_best=True,
+                            save_periodic=False,
+                            save_onnx=not args.no_onnx,
+                            save_pth=getattr(args, "save_pth", True),
+                            save_periodic_onnx=False,
+                            opset_version=args.onnx_opset,
+                        )
+
+                logger.info("   [✓] Toàn bộ checkpoints tốt nhất và mô hình ONNX đã được lưu an toàn.")
+                logger.info("=" * 80)
+                break
 
     # Hoàn tất huấn luyện
     total_duration_min = (time.time() - start_train_time) / 60.0
@@ -571,7 +690,7 @@ def train_pipeline(args):
         logger.info(f"   + Best Checkpoint (ONNX)    : {checkpoint_mgr.best_onnx_path}")
         logger.info(f"   + Metadata chuẩn hóa (JSON) : {os.path.splitext(checkpoint_mgr.best_onnx_path)[0] + '_metadata.json'}")
     logger.info(f"   + Thống kê chuẩn hóa (pkl)  : {stats_path}")
-    if getattr(args, "save_pth", False):
+    if getattr(args, "save_pth", True):
         logger.info(f"   + Best Checkpoint (PyTorch) : {checkpoint_mgr.best_checkpoint_path}")
         logger.info(f"   + Latest Checkpoint (PyTorch): {checkpoint_mgr.latest_checkpoint_path}")
     logger.info("=" * 80)
@@ -623,7 +742,7 @@ def parse_args():
     parser.add_argument("--d_model", type=int, default=512, help="Kích thước ẩn Transformer d_model")
     parser.add_argument("--nheads", type=int, default=8, help="Số heads của Multi-Head Attention")
     parser.add_argument("--dim_feedforward", type=int, default=2048, help="Kích thước lớp ẩn FFN")
-    parser.add_argument("--dropout", type=float, default=0.1, help="Tỷ lệ Dropout")
+    parser.add_argument("--dropout", type=float, default=0.3, help="Tỷ lệ Dropout")
     parser.add_argument("--chunk_size", type=int, default=50, help="Số bước hành động tương lai (k=50 bước = 1 giây)")
     parser.add_argument("--action_dim", type=int, default=16, help="Số bậc tự do 2 tay robot (16 động cơ)")
     parser.add_argument("--qpos_dim", type=int, default=16, help="Số chiều góc khớp đầu vào")
@@ -637,9 +756,17 @@ def parse_args():
     parser.add_argument("--kl_weight", type=float, default=10.0, help="Trọng số beta cho KL Divergence Loss")
     parser.add_argument("--loss_type", type=str, default="l1", choices=["l1", "l2"], help="Hàm mất mát phục dựng (l1 hoặc l2)")
 
-    # Tiền xử lý RGB-D (Chuẩn 16:9 RealSense Camera 240x424)
-    parser.add_argument("--img_height", type=int, default=240, help="Chiều cao ảnh RGB-D (mặc định 240 cho chuẩn 16:9 RealSense)")
-    parser.add_argument("--img_width", type=int, default=424, help="Chiều rộng ảnh RGB-D (mặc định 424 cho chuẩn 16:9 RealSense)")
+    # Phương pháp 2: Hàm mất mát phạt Cross-Attention (Visual Attention Alignment)
+    parser.add_argument("--use_attn_loss", action="store_true", default=True, help="Bật nhánh Cross-Attention Alignment loss (Phương pháp 2, mặc định: True)")
+    parser.add_argument("--no_attn_loss", "--no-attn-loss", dest="use_attn_loss", action="store_false", help="Tắt nhánh Cross-Attention loss")
+    parser.add_argument("--lambda_attn", type=float, default=0.1, help="Trọng số lambda_attn cho Cross-Attention loss (mặc định: 0.1)")
+    parser.add_argument("--attn_tau", type=float, default=0.6, help="Ngưỡng tỷ lệ chú ý thị giác tối thiểu tau trong Hinge Loss (mặc định: 0.6)")
+    parser.add_argument("--attn_focus_weight", type=float, default=1.0, help="Trọng số cho 2A Visual Attention Focus loss (mặc định: 1.0)")
+    parser.add_argument("--attn_bg_weight", type=float, default=1.0, help="Trọng số cho 2B Spatial Background Suppression loss (mặc định: 1.0)")
+
+    # Tiền xử lý RGB-D (Chuẩn Camera 640x480)
+    parser.add_argument("--img_height", type=int, default=480, help="Chiều cao ảnh RGB-D (mặc định 480 cho chuẩn 640x480)")
+    parser.add_argument("--img_width", type=int, default=640, help="Chiều rộng ảnh RGB-D (mặc định 640 cho chuẩn 640x480)")
     parser.add_argument("--depth_min_m", type=float, default=0.2, help="Khoảng cách bàn tối thiểu (m)")
     parser.add_argument("--depth_max_m", type=float, default=1.2, help="Khoảng cách bàn tối đa (m)")
     parser.add_argument("--step_stride", type=int, default=1, help="Bước nhảy lấy mẫu start_t trong episode")
@@ -651,12 +778,22 @@ def parse_args():
     parser.add_argument("--eval_every", type=int, default=10, help="Đánh giá validation mỗi N epochs (mặc định: 10)")
     parser.add_argument("--save_every", type=int, default=10, help="Chu kỳ lưu checkpoint mỗi N epochs (mặc định: 10)")
     parser.add_argument("--log_every_steps", type=int, default=10, help="Ghi nhận metric mỗi N bước batch")
-    parser.add_argument("--save_pth", action="store_true", help="Lưu thêm file checkpoint PyTorch (.pth) nếu cần")
-    parser.add_argument("--save_logs", action="store_true", help="Lưu thêm file log train.log, metrics.jsonl, config.json")
-    parser.add_argument("--use_tensorboard", action="store_true", help="Bật ghi nhận dữ liệu TensorBoard")
+    parser.add_argument("--save_pth", action="store_true", default=True, help="Tự động lưu file checkpoint PyTorch (.pth) định kỳ và best/latest (mặc định: True)")
+    parser.add_argument("--no_save_pth", "--no-save-pth", dest="save_pth", action="store_false", help="Tắt lưu file checkpoint PyTorch (.pth)")
+    parser.add_argument("--save_logs", action="store_true", default=True, help="Tự động lưu file log train.log, metrics.jsonl, config.json (mặc định: True)")
+    parser.add_argument("--no_save_logs", "--no-save-logs", dest="save_logs", action="store_false", help="Tắt lưu file log")
+    parser.add_argument("--use_tensorboard", action="store_true", default=True, help="Bật ghi nhận dữ liệu TensorBoard (mặc định: True)")
+    parser.add_argument("--no_tensorboard", "--no-tensorboard", dest="use_tensorboard", action="store_false", help="Tắt ghi nhận TensorBoard")
     parser.add_argument("--no_onnx", action="store_true", help="Tắt tự động xuất mô hình ONNX khi lưu best checkpoint")
     parser.add_argument("--onnx_opset", type=int, default=18, help="Phiên bản ONNX opset (mặc định 18)")
-    parser.add_argument("--onnx_periodic", action="store_true", help="Xuất ONNX cho cả các checkpoint lưu định kỳ mỗi N epochs")
+    parser.add_argument("--onnx_periodic", action="store_true", default=True, help="Xuất ONNX cho cả các checkpoint lưu định kỳ mỗi N epochs (mặc định: True)")
+    parser.add_argument("--no_onnx_periodic", "--no-onnx-periodic", dest="onnx_periodic", action="store_false", help="Tắt xuất ONNX định kỳ")
+    parser.add_argument("--early_stop", action="store_true", default=True, help="Bật dừng sớm khi loss chững lại sau N epochs (mặc định: True)")
+    parser.add_argument("--no_early_stop", "--no-early-stop", dest="early_stop", action="store_false", help="Tắt tính năng dừng sớm")
+    parser.add_argument("--early_stop_patience", type=int, default=10, help="Số epochs kiên nhẫn: dừng nếu sau N epochs loss không giảm >= min_delta (mặc định: 10)")
+    parser.add_argument("--early_stop_min_delta", "--early_stop_delta", type=float, default=0.001, help="Mức giảm tối thiểu của loss để coi là có cải thiện (mặc định: 0.001)")
+    parser.add_argument("--early_stop_metric", type=str, default="train_loss", choices=["train_loss", "val_loss"], help="Đại lượng theo dõi để dừng sớm (train_loss hoặc val_loss, mặc định: train_loss)")
+    parser.add_argument("--early_stop_target_loss", "--early_stop_loss", type=float, default=0.0, help="Ngưỡng loss tuyệt đối tùy chọn: nếu loss < ngưỡng này thì dừng ngay (mặc định: 0.0 = tắt)")
 
     # Phần cứng & Môi trường
     parser.add_argument("--device", type=str, default="cuda", help="Thiết bị thực thi (cuda hoặc cpu)")

@@ -75,8 +75,8 @@ pip install -e .
 
 Tập dữ liệu ở định dạng **HDF5 (`.hdf5`)** theo chuẩn mô tả trong [`DATA_FORMAT_SPECIFICATION.md`](DATA_FORMAT_SPECIFICATION.md):
 - **Observations:**
-  - `observations/images/chest_rgb`: Shape `[T, 240, 424, 3]`, kiểu `uint8` (Chuẩn tỷ lệ 16:9 của camera RealSense D435/D405)
-  - `observations/images/chest_depth`: Shape `[T, 240, 424]`, kiểu `uint16` (mm)
+  - `observations/images/chest_rgb`: Shape `[T, 480, 640, 3]`, kiểu `uint8` (Chuẩn độ phân giải 640x480 hoặc 16:9 với Letterbox)
+  - `observations/images/chest_depth`: Shape `[T, 480, 640]`, kiểu `uint16` (mm)
   - `observations/qpos`: Shape `[T, 16]`, kiểu `float32` (14 khớp tay rad + 2 kẹp)
 - **Timestamps:**
   - `timestamp_ns`: Shape `[T]`, kiểu `int64` (thời điểm ghi nhận thực tế từng bước)
@@ -101,73 +101,115 @@ Chạy các lệnh dưới đây trên **Terminal của máy cá nhân hoặc m�
 
 #### Cách 1: Dùng lệnh `rsync` (Khuyên dùng: Tốc độ cao, có hiển thị %, tự động truyền tiếp nếu đứt mạng)
 ```bash
-# Đẩy toàn bộ thư mục data_set lên server huấn luyện:
-rsync -avzP path/to/local/data_set/ toann@192.168.8.19:/home/quan/code/OpenArm_ACT_Training/data_set/data_set/
+# Đẩy toàn bộ thư mục data_set lên server huấn luyện (thư mục quan_ws):
+rsync -avzP path/to/local/data_set/ toann@VR-CUONGNM88-D:~/quan_ws/data_set/data_set/
+# (Hoặc dùng địa chỉ IP: toann@192.168.8.19:~/quan_ws/data_set/data_set/)
 ```
 *(Thay `path/to/local/data_set/` bằng đường dẫn thư mục chứa dataset trên máy bạn. Nếu bị rớt mạng giữa chừng, chỉ cần chạy lại lệnh, `rsync` sẽ tự động truyền tiếp các file còn dang dở).*
 
 #### Cách 2: Dùng lệnh `scp` (Đơn giản, sẵn có trên Linux / macOS / Windows PowerShell)
 ```bash
 # Đẩy toàn bộ các file .hdf5 lên server:
-scp -r path/to/local/data_set/*.hdf5 toann@192.168.8.19:/home/quan/code/OpenArm_ACT_Training/data_set/data_set/
+scp -r path/to/local/data_set/*.hdf5 toann@VR-CUONGNM88-D:~/quan_ws/data_set/data_set/
 ```
 
 ---
 
-## 🚀 Huấn luyện mô hình (Training)
+## 🚀 Quy trình Huấn luyện Mô hình trên Server (Server Training Workflow)
 
-### 0. Khởi tạo phiên làm việc với tmux & Thiết lập môi trường (Khuyên dùng khi chạy trên Server)
-Khi huấn luyện trên máy chủ từ xa qua SSH, hãy sử dụng `tmux` để tiến trình huấn luyện liên tục chạy ngầm ổn định ngay cả khi ngắt kết nối SSH, gập laptop hoặc rớt mạng:
+Dưới đây là toàn bộ quy trình chuẩn từng bước để huấn luyện mô hình ACT trên server `VR-CUONGNM88-D` (tài khoản `toann`, thư mục làm việc `~/quan_ws`), bắt đầu từ khâu đẩy mã nguồn từ máy cá nhân lên máy chủ:
 
-#### Bước 0.1: Tạo phiên tmux và môi trường ảo
+---
+
+### Bước 1: Đẩy mã nguồn từ máy cá nhân lên thư mục `quan_ws` trên Server
+
+Bạn có thể lựa chọn 1 trong 2 cách sau tùy theo thói quen làm việc:
+
+#### Cách 1: Đồng bộ trực tiếp siêu tốc qua `rsync` (Khuyên dùng — Nhanh nhất, không phụ thuộc Git commit)
+Chạy lệnh này trên **Terminal của máy cá nhân (Local)** tại thư mục mã nguồn:
 ```bash
-# 1. Tạo một phiên tmux mới có tên là 'act_train'
+# Đồng bộ toàn bộ mã nguồn lên server vào thư mục ~/quan_ws (loại trừ venv, checkpoints, git):
+rsync -avzP --exclude='.git' --exclude='venv' --exclude='checkpoints' --exclude='*.onnx*' \
+    ./ toann@VR-CUONGNM88-D:~/quan_ws/
+
+# (Hoặc thay VR-CUONGNM88-D bằng IP nếu chưa cấu hình hostname: toann@192.168.8.19:~/quan_ws/)
+```
+
+#### Cách 2: Đẩy mã nguồn qua Git (GitHub)
+- **Trên máy cá nhân (Local):**
+  ```bash
+  git add .
+  git commit -m "Update ACT pipeline: 640x480 resolution & Visual Auxiliary Losses"
+  git push origin master    # Hoặc đẩy nhánh đang phát triển: git push origin quan1
+  ```
+- **Trên Server (`toann@VR-CUONGNM88-D`):**
+  ```bash
+  cd ~/quan_ws
+  git fetch origin
+  git pull origin master    # Hoặc chuyển nhánh: git checkout quan1 && git pull origin quan1
+  ```
+
+---
+
+### Bước 2: Kết nối SSH & Khởi tạo phiên làm việc `tmux` trên Server
+
+Tiến trình huấn luyện kéo dài nhiều giờ. Để tránh bị ngắt tiến trình khi đóng laptop, gập máy hoặc mạng SSH chập chờn, **bắt buộc chạy trong phiên `tmux`**:
+
+```bash
+# 1. Đăng nhập SSH vào Server:
+ssh toann@VR-CUONGNM88-D    # Hoặc: ssh toann@192.168.8.19
+
+# 2. Di chuyển vào thư mục làm việc:
+cd ~/quan_ws
+
+# 3. Tạo một phiên tmux mới có tên là 'act_train':
 tmux new -s act_train
 
-# 2. Tạo môi trường ảo Python và kích hoạt:
-python3 -m venv venv
-source venv/bin/activate
+# (Nếu phiên act_train đã có sẵn từ trước, vào lại phiên bằng lệnh):
+# tmux attach -t act_train
 ```
 
-*(Lưu ý: Nếu hệ thống báo lỗi thiếu gói venv, chạy: `sudo apt update && sudo apt install -y python3-venv python3-pip`)*
-
-#### Bước 0.2: Cài đặt đầy đủ các thư viện cần thiết (Dependencies)
-Chạy các lệnh sau bên trong môi trường `(venv)` để tải và cài đặt toàn bộ thư viện:
-
-```bash
-# 1. Nâng cấp công cụ cài đặt pip
-pip install --upgrade pip
-
-# 2. Cài đặt PyTorch có hỗ trợ GPU CUDA (Ví dụ CUDA 12.1):
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# 3. Cài đặt toàn bộ thư viện cần thiết (h5py, onnx, onnxruntime, scipy, tensorboard, opencv...)
-pip install -r requirements.txt
-```
-
-> **💡 Các thao tác và phím tắt tmux cần nhớ:**
-> - **Rời khỏi phiên (Detach)** để tiến trình chạy ngầm: Nhấn tổ hợp phím **`Ctrl + B`**, sau đó thả tay ra và nhấn **`D`**.
-> - **Quay lại phiên (Re-attach)** để theo dõi log huấn luyện:
->   ```bash
->   tmux attach -t act_train
->   ```
-> - **Xem danh sách các phiên đang chạy:**
->   ```bash
->   tmux ls
->   ```
-> - **Đóng/Xóa phiên tmux** (khi huấn luyện xong):
->   ```bash
->   tmux kill-session -t act_train
->   # Hoặc gõ lệnh 'exit' trực tiếp bên trong phiên tmux
->   ```
+> **💡 Các phím tắt tmux cốt lõi cần nhớ:**
+> - **Rời khỏi phiên (Detach)** để tiến trình tiếp tục chạy ngầm trên server: Nhấn tổ hợp phím **`Ctrl + B`**, sau đó thả tay ra và nhấn **`D`**.
+> - **Vào lại phiên (Re-attach)** để theo dõi tiếp: `tmux attach -t act_train`
+> - **Xem danh sách các phiên đang chạy:** `tmux ls`
+> - **Đóng/Xóa phiên** (khi đã huấn luyện xong): `tmux kill-session -t act_train`
 
 ---
 
-### 1. Lệnh chạy huấn luyện tiêu chuẩn (Recommended Training Command)
-Chạy huấn luyện mô hình ACT trên GPU 0 với cấu hình tối ưu 100 epochs, batch size 16 (hoặc 32 nếu VRAM lớn), tự động đánh giá và lưu checkpoint mỗi 10 epochs, đồng thời bật theo dõi qua **TensorBoard** và **Weights & Biases (WandB)**:
+### Bước 3: Kích hoạt môi trường ảo Python & Kiểm tra tài nguyên
+
+Bên trong phiên `tmux` trên server, chạy các lệnh sau:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
+# 1. Kích hoạt môi trường ảo Python:
+source venv/bin/activate
+
+# (Lưu ý: Nếu server mới tinh chưa tạo môi trường ảo, hãy chạy 1 lần):
+# python3 -m venv venv
+# source venv/bin/activate
+# pip install --upgrade pip
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# pip install -r requirements.txt
+
+# 2. Kiểm tra nhận diện GPU NVIDIA và VRAM:
+nvidia-smi
+
+# 3. Kiểm tra tính toàn vẹn và tỷ lệ ảnh (640x480) của tập dữ liệu trước khi train:
+python validate_dataset.py --dataset_dir data_set/data_set
+```
+
+---
+
+### Bước 4: Lệnh chạy huấn luyện tiêu chuẩn trên Server (Recommended Training Command)
+
+Chạy lệnh huấn luyện ACT tối ưu toàn diện trên GPU 0:
+- Camera RGB-D chuẩn **640x480** (H=480, W=640, 300 visual tokens).
+- Tự động lưu checkpoint PyTorch (`.pth`), xuất định kỳ mô hình ONNX (`.onnx`), ghi log và TensorBoard.
+- Tự động dừng sớm (**Plateau Early Stopping**) nếu validation loss không cải thiện sau 10 lần đánh giá liên tiếp.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m act_pipeline.train \
     --dataset_dir data_set/data_set \
     --output_dir checkpoints/act_openarm \
     --epochs 100 \
@@ -179,81 +221,78 @@ CUDA_VISIBLE_DEVICES=0 python3 -m act_pipeline.train \
     --val_split 0.15 \
     --eval_every 10 \
     --save_every 10 \
+    --img_height 480 \
+    --img_width 640 \
     --use_tensorboard \
-    --use_wandb \
-    --wandb_project act-openarm \
+    --save_pth \
+    --save_logs \
     --device cuda
 ```
 
-> **💡 Gợi ý:**
-> - Nếu chỉ muốn giám sát cục bộ không dùng internet: Bỏ cờ `--use_wandb` và giữ `--use_tensorboard`.
-> - Nếu giám sát từ xa không cần mạng LAN / không cắm cáp: Giữ `--use_wandb` (sau khi chạy `wandb login`).
-> - Nếu GPU có VRAM khiêm tốn (<=6GB): Đặt `--batch_size 16`. Nếu GPU 16GB–24GB: Có thể tăng `--batch_size 32`.
-
-### 2. Lệnh huấn luyện cơ bản hoặc chạy qua script entrypoint:
-```bash
-# Chạy trực tiếp qua train.py (với TensorBoard):
-python train.py --dataset_dir data_set/data_set --output_dir checkpoints/act_openarm --use_tensorboard
-
-# Chọn GPU cụ thể (ví dụ GPU 1):
-CUDA_VISIBLE_DEVICES=1 python train.py --dataset_dir data_set/data_set --output_dir checkpoints/act_openarm --use_tensorboard
-```
-
-### 3. Các siêu tham số quan trọng
-
-| Tham số | Mặc định | Ý nghĩa |
-| :--- | :--- | :--- |
-| `--dataset_dir` | `dataset/` | Thư mục chứa các file `.hdf5` |
-| `--output_dir` | `checkpoints/act_openarm` | Thư mục lưu checkpoint ONNX và normalization stats |
-| `--epochs` | `500` | Tổng số epochs huấn luyện |
-| `--batch_size` | `16` | Kích thước batch (GPU 6GB dùng 16, GPU >=16GB có thể dùng 32) |
-| `--chunk_size` | `50` | Độ dài cửa sổ hành động tương lai ($k = 50$ bước $\approx 1.0$ giây @ 50Hz) |
-| `--lr` | `1e-4` | Learning rate cho Transformer Decoder và CVAE Encoder |
-| `--lr_backbone` | `1e-5` | Learning rate nhỏ cho Conv1 4-Channel Adapter |
-| `--kl_weight` | `10.0` | Hệ số phạt $\beta$ cho hàm mất mát KL Divergence |
-| `--val_split` | `0.15` | Tỷ lệ phân chia tập validation (15% số episode) |
-| `--eval_every` | `10` | Chu kỳ đánh giá tập validation (mặc định 10 epochs) |
-| `--save_every` | `10` | Chu kỳ kiểm tra và lưu checkpoint (mặc định 10 epochs) |
-| `--save_pth` | `False` | (Tùy chọn) Lưu thêm file checkpoint PyTorch `.pth` |
-| `--save_logs` | `False` | (Tùy chọn) Lưu thêm file text `train.log`, `metrics.jsonl` |
-| `--backbone_type` | `convnext_nano` | Kiến trúc mạng trích xuất thị giác (độc quyền ConvNeXt-Nano) |
-| `--unfreeze_backbone` | `False` | (Tùy chọn) Mở khóa để fine-tune toàn bộ trọng số Backbone |
-| `--use_tensorboard` | `False` | (Tùy chọn) Bật ghi nhật ký đồ thị TensorBoard vào `<output_dir>/tensorboard` |
-| `--use_wandb` | `False` | (Tùy chọn) Bật đồng bộ theo dõi trực tuyến lên cloud Weights & Biases |
-| `--wandb_project` | `act-openarm` | Tên dự án trên Weights & Biases |
+> **💡 Gợi ý điều chỉnh theo cấu hình phần cứng:**
+> - **Batch Size:** Nếu GPU có VRAM khiêm tốn ($\le 8\text{GB}$), giữ `--batch_size 16`. Nếu GPU có VRAM lớn ($16\text{GB} - 24\text{GB}$ như RTX 3090/4090/A5000), có thể tăng `--batch_size 32`.
+> - **Rời khỏi terminal an toàn (Detach tmux):** Khi thấy log bắt đầu in Epoch 1, bạn nhấn **`Ctrl + B`** rồi bấm **`D`**. Quá trình huấn luyện vẫn tiếp tục chạy trên server ngay cả khi bạn tắt máy tính cá nhân.
 
 ---
 
-## 📈 Giám sát quá trình huấn luyện
+### Bước 5: Giám sát quá trình huấn luyện (Monitoring)
 
-### Cách 1: Giám sát trực quan với TensorBoard (Mạng nội bộ / SSH Tunnel)
-
-Khi bật cờ `--use_tensorboard`, hệ thống lưu log vào `checkpoints/act_openarm/tensorboard/`.
-
-#### Bước 1: Khởi chạy TensorBoard trên server
-Mở một terminal mới (hoặc trong phiên tmux `tmux new -s act_tb`):
+#### Cách 1: Theo dõi file log thời gian thực
+Mở một terminal mới kết nối vào server và chạy:
 ```bash
-tensorboard --logdir checkpoints/act_openarm/tensorboard --port 6007
+tail -f ~/quan_ws/checkpoints/act_openarm/train.log
 ```
 
-#### Bước 2: Mở đường hầm SSH từ máy tính cá nhân
-Mở terminal trên máy tính của bạn và forward cổng 6007:
+#### Cách 2: Giám sát trực quan qua TensorBoard (SSH Tunnel)
+1. **Khởi chạy TensorBoard trên Server** (chạy trong phiên tmux riêng `tmux new -s act_tb`):
+   ```bash
+   tensorboard --logdir ~/quan_ws/checkpoints/act_openarm/tensorboard --port 6007
+   ```
+2. **Mở đường hầm SSH từ máy tính cá nhân (Local):**
+   Mở terminal trên máy tính của bạn và forward cổng 6007:
+   ```bash
+   ssh -N -L 6007:localhost:6007 toann@VR-CUONGNM88-D
+   # (Hoặc: ssh -N -L 6007:localhost:6007 toann@192.168.8.19)
+   ```
+3. Mở trình duyệt web trên máy cá nhân truy cập: **`http://localhost:6007`** để xem biểu đồ loss, learning rate và MAE từng khớp.
+
+---
+
+### Bước 6: Xuất và Kiểm tra mô hình ONNX sau khi hoàn thành
+
+Mặc định pipeline đã tự động lưu và xuất `best_checkpoint.onnx` khi đạt epoch có loss tốt nhất. Bạn cũng có thể xuất thủ công bất kỳ lúc nào:
+
 ```bash
-ssh -N -L 6007:localhost:6007 toann@192.168.8.19
+cd ~/quan_ws
+source venv/bin/activate
+
+python export_onnx.py \
+    --checkpoint checkpoints/act_openarm/best_checkpoint.pth \
+    --output checkpoints/act_openarm/best_checkpoint.onnx
 ```
-Sau đó mở trình duyệt truy cập: `http://localhost:6007`
 
-### Cách 2: Giám sát từ xa qua Weights & Biases (Không cần cắm LAN / Wi-Fi)
+---
 
-Khi bật cờ `--use_wandb`, hệ thống tự động đẩy toàn bộ metric (loss, lr, per-joint MAE) lên cloud wandb.ai:
+### 📋 Bảng các siêu tham số quan trọng
 
-```bash
-# 1. Đăng nhập 1 lần duy nhất trên server:
-wandb login
-
-# 2. Xem trực tiếp biểu đồ mọi lúc mọi nơi qua điện thoại/laptop tại:
-# https://wandb.ai
-```
+| Tham số | Mặc định | Ý nghĩa |
+| :--- | :--- | :--- |
+| `--dataset_dir` | `data_set/data_set` | Thư mục chứa các file `.hdf5` |
+| `--output_dir` | `checkpoints/act_openarm` | Thư mục lưu checkpoint, model ONNX, metadata và log |
+| `--epochs` | `100` | Tổng số epochs huấn luyện |
+| `--batch_size` | `16` | Kích thước batch (GPU 6-8GB dùng 16, GPU >=16GB dùng 32) |
+| `--chunk_size` | `50` | Độ dài cửa sổ hành động tương lai ($k = 50$ bước $\approx 1.0$ giây @ 50Hz) |
+| `--lr` | `1e-4` | Learning rate cho Transformer Decoder và CVAE Encoder |
+| `--lr_backbone` | `1e-5` | Learning rate cho ConvNeXt-Nano Backbone |
+| `--kl_weight` | `10.0` | Hệ số phạt $\beta$ cho hàm mất mát KL Divergence |
+| `--img_height` | `480` | Chiều cao ảnh RGB-D (Chuẩn 640x480) |
+| `--img_width` | `640` | Chiều rộng ảnh RGB-D (Chuẩn 640x480) |
+| `--val_split` | `0.15` | Tỷ lệ phân chia tập validation (15% số episode) |
+| `--eval_every` | `10` | Chu kỳ đánh giá tập validation (mỗi 10 epochs) |
+| `--save_every` | `10` | Chu kỳ kiểm tra và lưu checkpoint (mỗi 10 epochs) |
+| `--save_pth` | `True` | Tự động lưu file checkpoint PyTorch `.pth` |
+| `--save_logs` | `True` | Tự động ghi file text `train.log`, `metrics.jsonl` |
+| `--use_tensorboard`| `True` | Tự động ghi log đồ thị TensorBoard vào `<output_dir>/tensorboard` |
 
 ---
 
@@ -299,17 +338,17 @@ Chạy các lệnh dưới đây trên **terminal của máy cá nhân hoặc m�
 
 ### Cách 1: Dùng lệnh `scp` (Đơn giản, sẵn có trên Linux / macOS / Windows PowerShell)
 ```bash
-# 1. Tải riêng file mô hình ONNX tốt nhất (khoảng ~108 MB):
-scp toann@192.168.8.19:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/best_checkpoint.onnx ./
+# 1. Tải file mô hình ONNX tốt nhất:
+scp toann@VR-CUONGNM88-D:~/quan_ws/checkpoints/act_openarm/best_checkpoint.onnx ./
 
 # 2. Tải file metadata JSON đi kèm:
-scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/best_checkpoint_metadata.json ./
+scp toann@VR-CUONGNM88-D:~/quan_ws/checkpoints/act_openarm/best_checkpoint_metadata.json ./
 
 # 3. Tải file thống kê chuẩn hóa dataset_stats.pkl:
-scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/dataset_stats.pkl ./
+scp toann@VR-CUONGNM88-D:~/quan_ws/checkpoints/act_openarm/dataset_stats.pkl ./
 
-# Hoặc tải nhanh toàn bộ 3 file trong thư mục checkpoints về thư mục hiện tại:
-scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/* ./
+# Hoặc tải nhanh toàn bộ file trong thư mục checkpoints về thư mục hiện tại:
+scp toann@VR-CUONGNM88-D:~/quan_ws/checkpoints/act_openarm/* ./
 ```
 
 *(Thay `username` và `<IP_SERVER>` bằng tài khoản và địa chỉ IP của server huấn luyện, ví dụ: `scp quan@192.168.1.100:...`)*
@@ -317,5 +356,6 @@ scp username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_op
 ### Cách 2: Dùng lệnh `rsync` (Khuyên dùng: Tốc độ cao, có hiển thị % tiến trình tải)
 ```bash
 # Tải đồng bộ toàn bộ thư mục checkpoints về thư mục local của robot:
-rsync -avzP username@<IP_SERVER>:/home/quan/code/OpenArm_ACT_Training/checkpoints/act_openarm/ ./act_robot_models/
+rsync -avzP toann@VR-CUONGNM88-D:~/quan_ws/checkpoints/act_openarm/ ./act_robot_models/
+# (Hoặc thay VR-CUONGNM88-D bằng IP: toann@192.168.8.19:~/quan_ws/checkpoints/act_openarm/)
 ```

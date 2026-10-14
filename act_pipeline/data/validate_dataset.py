@@ -15,7 +15,7 @@ import sys
 import glob
 import json
 import argparse
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import h5py
 
@@ -73,7 +73,7 @@ class ValidationResult:
         self.warnings.append(msg)
 
 
-def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> ValidationResult:
+def validate_single_hdf5(file_path: str, expected_hz: float = 50.0, camera_names: Optional[List[str]] = None) -> ValidationResult:
     res = ValidationResult(file_path)
 
     if not os.path.exists(file_path):
@@ -111,13 +111,28 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
                 return res
 
             images = obs["images"]
-            has_rgb = ("chest_rgb" in images) or ("chest" in images)
-            has_depth = ("chest_depth" in images) or ("chest" in images and images["chest"].shape[-1] == 4)
+            
+            # Tự động nhận diện danh sách camera từ attrs hoặc mặc định
+            active_camera_names = list(camera_names) if camera_names is not None else None
+            if active_camera_names is None:
+                if "cameras_json" in attrs:
+                    try:
+                        active_camera_names = json.loads(attrs["cameras_json"])
+                    except Exception:
+                        active_camera_names = ["chest", "front"]
+                else:
+                    active_camera_names = ["chest", "front"]
 
-            if not has_rgb:
-                res.add_error("Thiếu dataset ảnh màu '/observations/images/chest_rgb'")
-            if not has_depth:
-                res.add_error("Thiếu dataset ảnh chiều sâu '/observations/images/chest_depth'")
+            res.info["cameras"] = active_camera_names
+
+            for cam in active_camera_names:
+                has_rgb = (f"{cam}_rgb" in images) or (cam in images)
+                has_depth = (f"{cam}_depth" in images) or (cam in images and images[cam].shape[-1] == 4)
+
+                if not has_rgb:
+                    res.add_error(f"Thiếu dataset ảnh màu '/observations/images/{cam}_rgb'")
+                if not has_depth:
+                    res.add_error(f"Thiếu dataset ảnh chiều sâu '/observations/images/{cam}_depth'")
 
             if "qpos" not in obs:
                 res.add_error("Thiếu dataset góc khớp '/observations/qpos'")
@@ -143,46 +158,36 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
             if T < 50:
                 res.add_error(f"Episode quá ngắn: chỉ có {T} bước (nhỏ hơn chunk_size=50)")
 
-            # Kiểm tra ảnh RGB
-            if "chest_rgb" in images:
-                rgb_ds = images["chest_rgb"]
-                if len(rgb_ds) != T:
-                    res.add_error(f"Độ dài ảnh RGB ({len(rgb_ds)}) không khớp với qpos ({T})")
-                if rgb_ds.dtype != np.uint8:
-                    res.add_error(f"Kiểu dữ liệu chest_rgb là {rgb_ds.dtype}, bắt buộc phải là uint8")
-                if len(rgb_ds.shape) != 4 or rgb_ds.shape[3] != 3:
-                    res.add_error(f"Shape chest_rgb là {rgb_ds.shape}, yêu cầu chuẩn [T, H, W, 3]")
-                
-                H_img, W_img = rgb_ds.shape[1], rgb_ds.shape[2]
-                aspect_ratio = W_img / max(H_img, 1)
-                res.info["rgb_resolution"] = f"{W_img}x{H_img}"
-                res.info["aspect_ratio"] = f"{aspect_ratio:.2f}:1"
+            # Kiểm tra ảnh RGB và Depth cho từng góc camera
+            for cam in active_camera_names:
+                rgb_key = f"{cam}_rgb" if f"{cam}_rgb" in images else (cam if cam in images else None)
+                depth_key = f"{cam}_depth" if f"{cam}_depth" in images else None
 
-                # Cảnh báo méo tỷ lệ ảnh (Aspect Ratio Distortion Check)
-                is_16_9 = abs(aspect_ratio - (16.0 / 9.0)) < 0.05 or abs(aspect_ratio - (424.0 / 240.0)) < 0.05
-                if is_16_9:
-                    res.info["aspect_type"] = "16:9 (Chuẩn RealSense OpenArm)"
-                elif abs(aspect_ratio - (4.0 / 3.0)) < 0.05:
-                    res.info["aspect_type"] = "4:3"
-                    res.add_warning(
-                        f"Ảnh có tỷ lệ 4:3 ({W_img}x{H_img}) thay vì 16:9 (240x424). "
-                        f"Cần đảm bảo config pipeline trùng khớp để tránh méo hình học!"
-                    )
-                else:
-                    res.add_warning(f"Tỷ lệ ảnh không chuẩn: {W_img}x{H_img} (AR: {aspect_ratio:.2f}:1)")
+                H_img, W_img = None, None
+                if rgb_key:
+                    rgb_ds = images[rgb_key]
+                    if len(rgb_ds) != T:
+                        res.add_error(f"Độ dài ảnh RGB của {cam} ({len(rgb_ds)}) không khớp với qpos ({T})")
+                    if rgb_ds.dtype != np.uint8:
+                        res.add_error(f"Kiểu dữ liệu {rgb_key} là {rgb_ds.dtype}, bắt buộc phải là uint8")
+                    if len(rgb_ds.shape) != 4 or rgb_ds.shape[3] != 3:
+                        res.add_error(f"Shape {rgb_key} là {rgb_ds.shape}, yêu cầu chuẩn [T, H, W, 3]")
+                    else:
+                        H_img, W_img = rgb_ds.shape[1], rgb_ds.shape[2]
+                        aspect_ratio = W_img / max(H_img, 1)
+                        res.info[f"{cam}_rgb_resolution"] = f"{W_img}x{H_img}"
 
-            # Kiểm tra ảnh Depth
-            if "chest_depth" in images:
-                depth_ds = images["chest_depth"]
-                if len(depth_ds) != T:
-                    res.add_error(f"Độ dài ảnh Depth ({len(depth_ds)}) không khớp với qpos ({T})")
-                if depth_ds.dtype != np.uint16:
-                    res.add_warning(f"Kiểu dữ liệu chest_depth là {depth_ds.dtype}, khuyến nghị uint16 (mm) để tối ưu dung lượng")
-                
-                H_d, W_d = depth_ds.shape[1], depth_ds.shape[2]
-                res.info["depth_resolution"] = f"{W_d}x{H_d}"
-                if "chest_rgb" in images and (H_d != H_img or W_d != W_img):
-                    res.add_error(f"Độ phân giải Depth ({W_d}x{H_d}) không khớp với RGB ({W_img}x{H_img})!")
+                if depth_key:
+                    depth_ds = images[depth_key]
+                    if len(depth_ds) != T:
+                        res.add_error(f"Độ dài ảnh Depth của {cam} ({len(depth_ds)}) không khớp với qpos ({T})")
+                    if depth_ds.dtype != np.uint16:
+                        res.add_warning(f"Kiểu dữ liệu {depth_key} là {depth_ds.dtype}, khuyến nghị uint16 (mm) để tối ưu dung lượng")
+
+                    H_d, W_d = depth_ds.shape[1], depth_ds.shape[2]
+                    res.info[f"{cam}_depth_resolution"] = f"{W_d}x{H_d}"
+                    if H_img is not None and (H_d != H_img or W_d != W_img):
+                        res.add_error(f"Độ phân giải Depth {cam} ({W_d}x{H_d}) không khớp với RGB ({W_img}x{H_img})!")
 
             # 4. KIỂM TRA SHAPE & DTYPE CỦA QPOS VÀ ACTION
             if qpos_ds.shape[-1] != 16:
@@ -244,7 +249,7 @@ def validate_single_hdf5(file_path: str, expected_hz: float = 50.0) -> Validatio
     return res
 
 
-def validate_dataset_directory(dataset_dir: str, expected_hz: float = 50.0) -> Tuple[int, int, List[ValidationResult]]:
+def validate_dataset_directory(dataset_dir: str, expected_hz: float = 50.0, camera_names: Optional[List[str]] = None) -> Tuple[int, int, List[ValidationResult]]:
     files = sorted(glob.glob(os.path.join(dataset_dir, "*.hdf5")))
     # Loại trừ các file đang ghi dở .partial.hdf5
     files = [f for f in files if not f.endswith(".partial.hdf5")]
@@ -256,19 +261,22 @@ def validate_dataset_directory(dataset_dir: str, expected_hz: float = 50.0) -> T
     print("=" * 80)
     print(f"      🔍 BỘ KIỂM TRA ĐỊNH DẠNG DATASET HDF5 THEO DATA_FORMAT_SPECIFICATION.MD")
     print(f"      Thư mục: {dataset_dir} | Tổng số episodes: {len(files)} | Tần số chuẩn: {expected_hz}Hz")
+    if camera_names:
+        print(f"      Góc camera yêu cầu: {camera_names}")
     print("=" * 80)
 
     results: List[ValidationResult] = []
     passed_count = 0
 
     for idx, fpath in enumerate(files, 1):
-        res = validate_single_hdf5(fpath, expected_hz=expected_hz)
+        res = validate_single_hdf5(fpath, expected_hz=expected_hz, camera_names=camera_names)
         results.append(res)
 
         status_icon = "✅ CHUẨN" if res.passed else "❌ LỖI"
         info_str = f"T={res.info.get('timesteps', '?')} steps (~{res.info.get('duration_sec', '?')}s)"
-        if "rgb_resolution" in res.info:
-            info_str += f" | RGB: {res.info['rgb_resolution']}"
+        cams_info = res.info.get("cameras", [])
+        if cams_info:
+            info_str += f" | Cams: {cams_info}"
         if "calculated_hz" in res.info:
             info_str += f" | Thực tế: {res.info['calculated_hz']}Hz"
 
@@ -298,10 +306,11 @@ def main():
     parser = argparse.ArgumentParser(description="Kiểm tra định dạng file HDF5 OpenArm ACT theo DATA_FORMAT_SPECIFICATION.md")
     parser.add_argument("path", type=str, nargs="?", default="dataset", help="Đường dẫn file .hdf5 hoặc thư mục chứa dataset (mặc định: dataset)")
     parser.add_argument("--hz", type=float, default=50.0, help="Tần số lấy mẫu yêu cầu (mặc định: 50.0 Hz)")
+    parser.add_argument("--camera_names", nargs="+", default=None, help="Danh sách góc camera yêu cầu kiểm tra (mặc định: tự động nhận diện từ file hoặc chest + front)")
     args = parser.parse_args()
 
     if os.path.isfile(args.path):
-        res = validate_single_hdf5(args.path, expected_hz=args.hz)
+        res = validate_single_hdf5(args.path, expected_hz=args.hz, camera_names=args.camera_names)
         print("\n" + "=" * 70)
         print(f"Kết quả kiểm tra: {res.filename}")
         print(f"Trạng thái: {'✅ ĐẠT CHUẨN' if res.passed else '❌ CÓ LỖI'}")
@@ -317,7 +326,7 @@ def main():
         print("=" * 70 + "\n")
         sys.exit(0 if res.passed else 1)
     elif os.path.isdir(args.path):
-        passed, total, _ = validate_dataset_directory(args.path, expected_hz=args.hz)
+        passed, total, _ = validate_dataset_directory(args.path, expected_hz=args.hz, camera_names=args.camera_names)
         sys.exit(0 if passed == total and total > 0 else 1)
     else:
         print(f"[X] Đường dẫn không hợp lệ: {args.path}")

@@ -3,19 +3,22 @@
 """
 Unified ACT Policy Architecture for Bimanual OpenArm (16-DOF) + Chest RGB-D
 Vision Backbone: ConvNeXt-Nano (Pure-CNN SOTA)
-- 01 Chest Camera RGB-D [B, 4, 240, 424]
+- 01 Chest Camera RGB-D [B, 4, 480, 640]
 - ConvNeXt-Nano Backbone (Frozen hoặc Fine-tuned)
-- 2D Sinusoidal PE (Fixed) -> Visual Tokens [B, 91, 512]
+- 2D Sinusoidal PE (Fixed) -> Visual Tokens [B, 300, 512]
 - Joint State Projection Linear 16 -> 512
 - CVAE Transformer Encoder (2 Layers) + Latent Heads 512 -> 32
 - Latent Projection Linear 32 -> 512
-- Memory Tokens [B, 93, 512]
+- Memory Tokens [B, 302, 512] (300 Visual + 1 qpos + 1 z)
 - 50 Action Queries + 1D Temporal Sinusoidal PE
-- Transformer Decoder (4 Layers)
+- Transformer Decoder (4 Layers) với Cross-Attention Alignment
 - Action Linear Head 512 -> 16
+
+Hỗ trợ phương pháp hàm mất mát phụ trợ trên Cross-Attention (Phương pháp 2):
+- Cross-Attention Alignment Losses (2A Attention Ratio Hinge Loss + 2B Background Suppression Loss)
 """
 
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,12 +27,14 @@ from act_pipeline.config import ModelConfig
 from act_pipeline.models.backbone import build_vision_backbone, RGBDConvNeXtBackbone
 from act_pipeline.models.cvae import CVAEEncoder
 from act_pipeline.models.policy import TransformerPolicyDecoder
+from act_pipeline.models.attention_loss import CrossAttentionLossModule
 
 
 class ACTPolicy(nn.Module):
     """
     Toàn bộ mô hình ACT cho robot OpenArm hai tay (16-DOF):
     Ghép nối Backbone thị giác RGB-D ConvNeXt-Nano, CVAE Latent Generator và Policy Decoder.
+    Tích hợp Cross-Attention Alignment Loss (Phương pháp 2).
     """
     def __init__(self, config: Optional[ModelConfig] = None):
         super().__init__()
@@ -77,27 +82,41 @@ class ACTPolicy(nn.Module):
             action_dim=config.action_dim,
         )
 
+        # 5. CROSS-ATTENTION ALIGNMENT MODULE (Chỉ chạy lúc train)
+        self.use_attn_loss = getattr(config, "use_attn_loss", False)
+        if self.use_attn_loss:
+            self.attn_loss_module = CrossAttentionLossModule(
+                tau=getattr(config, "attn_tau", 0.6),
+                focus_weight=getattr(config, "attn_focus_weight", 1.0),
+                bg_weight=getattr(config, "attn_bg_weight", 1.0),
+            )
+        else:
+            self.attn_loss_module = None
+
     def forward(
         self,
         image: torch.Tensor,
         qpos: torch.Tensor,
         actions: Optional[torch.Tensor] = None,
         is_pad: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        return_aux: bool = False,
+    ):
         """
         Inputs:
             image: [B, 4, H, W] - Ảnh 4 kênh RGB-D (RGB + Depth)
             qpos: [B, 16] - Vector góc khớp 16 motor hiện tại
             actions: [B, chunk_size, 16] - Chuỗi hành động tương lai (Chỉ truyền khi Train)
             is_pad: [B, chunk_size] bool - Mask padding nếu gần cuối episode
+            return_aux: bool - Nếu True, trả về kèm aux_data cho hàm compute_loss
         Outputs:
             pred_actions: [B, chunk_size, 16] - Quỹ đạo 50 bước dự đoán cho 16 motor
             mu: [B, latent_dim] hoặc None khi Inference
             logvar: [B, latent_dim] hoặc None khi Inference
+            (Tùy chọn) aux_data: dict nếu return_aux=True
         """
         B = image.shape[0]
 
-        # 1. Trích xuất đặc trưng thị giác -> 300 Visual Tokens [B, 300, d_model]
+        # 1. Trích xuất đặc trưng thị giác -> Visual Tokens [B, N_patches, d_model]
         visual_tokens = self.backbone(image)
 
         # 2. Chiếu góc khớp hiện tại -> 1 qpos Token [B, 1, d_model]
@@ -108,13 +127,22 @@ class ACTPolicy(nn.Module):
         # Eval / Inference: z = 0
         z_token, mu, logvar = self.cvae(qpos=qpos, actions=actions, is_pad=is_pad)
 
-        # 4. Trộn Memory Tokens: [300 Visual + 1 qpos + 1 z] -> [B, 302, d_model]
+        # 4. Trộn Memory Tokens: [Visual + 1 qpos + 1 z] -> [B, N+2, d_model]
         memory = torch.cat([visual_tokens, qpos_token, z_token], dim=1)
 
         # 5. Giải mã Action Chunk qua Policy Decoder
-        pred_actions = self.policy_decoder(memory) # [B, chunk_size, action_dim]
-
-        return pred_actions, mu, logvar
+        if return_aux:
+            pred_actions, attn_weights = self.policy_decoder(memory, return_attn=True)
+            aux_data = {
+                "visual_tokens": visual_tokens,
+                "image": image,
+                "attn_weights": attn_weights,
+                "num_visual_tokens": visual_tokens.shape[1],
+            }
+            return pred_actions, mu, logvar, aux_data
+        else:
+            pred_actions = self.policy_decoder(memory, return_attn=False)
+            return pred_actions, mu, logvar
 
     def compute_loss(
         self,
@@ -125,10 +153,15 @@ class ACTPolicy(nn.Module):
         logvar: Optional[torch.Tensor],
         kl_weight: float = 10.0,
         loss_type: str = "l1",
+        aux_data: Optional[Dict[str, Any]] = None,
+        lambda_attn: float = 0.1,
+        attn_focus_weight: float = 1.0,
+        attn_bg_weight: float = 1.0,
+        attn_tau: float = 0.6,
     ) -> Dict[str, torch.Tensor]:
         """
-        Tính toán hàm mất mát Loss:
-        Loss = L_recon (L1 hoặc L2 có padding mask) + beta * KL_Loss
+        Tính toán toàn bộ hàm mất mát cho quá trình huấn luyện:
+        L_total = L_recon + beta * L_KL + lambda_attn * L_attn
         """
         B = actions.shape[0]
 
@@ -152,13 +185,42 @@ class ACTPolicy(nn.Module):
         else:
             kl_loss = torch.tensor(0.0, device=pred_actions.device)
 
-        # 3. Tổng hàm mất mát
-        total_loss = recon_loss + kl_weight * kl_loss
+        # 3. Phương pháp 2: Cross-Attention Alignment Losses (2A Focus Ratio + 2B Background Suppression)
+        attn_loss = torch.tensor(0.0, device=pred_actions.device)
+        attn_focus_loss = torch.tensor(0.0, device=pred_actions.device)
+        attn_bg_loss = torch.tensor(0.0, device=pred_actions.device)
+        attn_vis_ratio = torch.tensor(0.0, device=pred_actions.device)
+
+        if aux_data is not None and self.attn_loss_module is not None and aux_data.get("attn_weights") is not None:
+            attn_dict = self.attn_loss_module(
+                attn_weights=aux_data["attn_weights"],
+                num_visual_tokens=aux_data["num_visual_tokens"],
+                image=aux_data.get("image"),
+                tau=attn_tau,
+                focus_weight=attn_focus_weight,
+                bg_weight=attn_bg_weight,
+            )
+            attn_loss = attn_dict["attn_loss"]
+            attn_focus_loss = attn_dict["attn_focus_loss"]
+            attn_bg_loss = attn_dict["attn_bg_loss"]
+            attn_vis_ratio = attn_dict["attn_vis_ratio"]
+
+        # 4. Tổng hàm mất mát:
+        # L_total = L_recon + beta * L_KL + lambda_attn * L_attn
+        total_loss = (
+            recon_loss
+            + kl_weight * kl_loss
+            + lambda_attn * attn_loss
+        )
 
         return {
             "loss": total_loss,
             "recon_loss": recon_loss,
             "kl_loss": kl_loss,
+            "attn_loss": attn_loss,
+            "attn_focus_loss": attn_focus_loss,
+            "attn_bg_loss": attn_bg_loss,
+            "attn_vis_ratio": attn_vis_ratio,
         }
 
     @torch.no_grad()
@@ -177,7 +239,7 @@ class ACTPolicy(nn.Module):
             pred_actions: [B, chunk_size, 16]
         """
         self.eval()
-        pred_actions, _, _ = self.forward(image=image, qpos=qpos, actions=None, is_pad=None)
+        pred_actions, _, _ = self.forward(image=image, qpos=qpos, actions=None, is_pad=None, return_aux=False)
         return pred_actions
 
     def get_parameter_summary(self) -> Dict[str, Any]:

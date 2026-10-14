@@ -11,12 +11,12 @@ from typing import List, Tuple, Optional
 
 @dataclass
 class ModelConfig:
-    # Vision Backbone (16:9 RealSense Camera 240x424)
+    # Vision Backbone (Camera RGB-D 640x480)
     in_channels: int = 4            # RGB (3) + Depth (1)
     backbone_type: str = "convnext_nano" # ConvNeXt-Nano (Pure-CNN SOTA spatial feature extractor)
     freeze_backbone: bool = True    # Đóng băng ImageNet pretrained backbone
-    img_height: int = 240           # Chuẩn tỷ lệ 16:9 của camera RealSense (H=240, W=424)
-    img_width: int = 424
+    img_height: int = 480           # Chuẩn kích thước ảnh camera (H=480, W=640)
+    img_width: int = 640
     
     # Dimensions
     d_model: int = 512              # Transformer hidden dimension
@@ -37,6 +37,15 @@ class ModelConfig:
     # Depth Preprocessing
     depth_min_m: float = 0.2        # Khoảng cách bàn tối thiểu (mét)
     depth_max_m: float = 1.2        # Khoảng cách bàn tối đa (mét)
+
+
+
+    # Method 2: Cross-Attention Alignment Losses
+    use_attn_loss: bool = True
+    lambda_attn: float = 0.1        # Trọng số lambda_attn cho Cross-Attention loss
+    attn_tau: float = 0.6           # Ngưỡng tỷ lệ chú ý tối thiểu cho thị giác (2A)
+    attn_focus_weight: float = 1.0  # Trọng số cho 2A Visual Attention Focus loss
+    attn_bg_weight: float = 1.0     # Trọng số cho 2B Spatial Background Suppression loss
 
 
 @dataclass
@@ -61,6 +70,15 @@ class TrainConfig:
     kl_weight: float = 10.0         # Trọng số beta cho KL Divergence loss
     loss_type: str = "l1"           # "l1" hoặc "l2"
     
+
+
+    # Method 2: Cross-Attention Alignment Losses
+    use_attn_loss: bool = True
+    lambda_attn: float = 0.1
+    attn_tau: float = 0.6
+    attn_focus_weight: float = 1.0
+    attn_bg_weight: float = 1.0
+    
     # Hardware & Performance
     num_workers: int = 2
     use_amp: bool = True            # Automatic Mixed Precision (FP16)
@@ -74,7 +92,15 @@ class TrainConfig:
     log_every_steps: int = 10       # In progress mỗi N batches
     target_hz: float = 50.0         # Tần số điều khiển chuẩn (50Hz = dt=0.02s)
     auto_resample: bool = True      # Tự động phát hiện rớt frame và đồng bộ về 50Hz
-    use_tensorboard: bool = False
+    save_pth: bool = True           # Tự động lưu checkpoint PyTorch (.pth)
+    onnx_periodic: bool = True      # Tự động xuất checkpoint ONNX định kỳ
+    save_logs: bool = True          # Tự động lưu file log (train.log, metrics.jsonl)
+    use_tensorboard: bool = True    # Bật TensorBoard mặc định
+    early_stop: bool = True             # Bật tính năng dừng sớm (Early Stopping)
+    early_stop_patience: int = 10       # Số epochs kiên nhẫn: dừng nếu sau 10 epoch không giảm >= min_delta
+    early_stop_min_delta: float = 0.001 # Mức giảm tối thiểu của loss (mặc định: 0.001)
+    early_stop_metric: str = "train_loss" # Đại lượng theo dõi ('train_loss' hoặc 'val_loss')
+    early_stop_target_loss: float = 0.0 # Ngưỡng loss tuyệt đối tùy chọn (đặt > 0 nếu muốn dừng khi loss < ngưỡng này)
     use_wandb: bool = False
     wandb_project: str = "act-openarm"
     wandb_entity: Optional[str] = None

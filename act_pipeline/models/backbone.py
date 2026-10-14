@@ -61,7 +61,7 @@ class RGBDConvNeXtBackbone(nn.Module):
       giúp định vị hình học và biên vật thể trong không gian 3D vượt trội.
     - 1x1 Conv Image Projection: Chiếu 640 kênh đặc trưng về d_model (512).
     - 2D Sinusoidal PE: Mã hóa tọa độ không gian 2D cho từng patch.
-    - Đầu ra: visual_tokens [B, N_patches, d_model] ([B, 91, 512] với ảnh 240x424).
+    - Đầu ra: visual_tokens [B, N_patches, d_model] ([B, 300, 512] với ảnh 640x480).
     """
     def __init__(
         self,
@@ -111,12 +111,18 @@ class RGBDConvNeXtBackbone(nn.Module):
         # 2D Sinusoidal Positional Encoding (Fixed)
         self.pos_embed_2d = SinusoidalPositionEmbedding2D(d_model=d_model)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_feature_map: bool = False,
+    ):
         """
         Input:
             x: [B, 4, H, W] - Ảnh 4 kênh RGB-D đã chuẩn hóa
+            return_feature_map: Nếu True, trả về cả tuple (visual_tokens, proj_feat)
         Output:
             visual_tokens: [B, N_patches, d_model]
+            (Tùy chọn) proj_feat: [B, d_model, H_feat, W_feat] nếu return_feature_map=True
         """
         # Trích xuất đặc trưng ConvNeXt-Nano
         feat = self.backbone.forward_features(x)  # [B, 640, H_feat, W_feat]
@@ -128,6 +134,8 @@ class RGBDConvNeXtBackbone(nn.Module):
 
         # Làm phẳng thành chuỗi Visual Tokens cho Transformer Decoder
         visual_tokens = feat_with_pos.flatten(2).permute(0, 2, 1)  # [B, N_patches, d_model]
+        if return_feature_map:
+            return visual_tokens, proj_feat
         return visual_tokens
 
 

@@ -33,7 +33,7 @@ def preprocess_rgbd(
         depth_raw: [H, W] uint16 (mm) hoặc float32 (m). Nếu None, tự sinh kênh depth ước lượng.
         depth_min_m: Khoảng cách tối thiểu (0.2 m)
         depth_max_m: Khoảng cách tối đa (1.2 m)
-        target_size: (H_target, W_target) - Kích thước đích (mặc định 240x424 cho 16:9 RealSense)
+        target_size: (H_target, W_target) - Kích thước đích (mặc định 480x640 cho chuẩn 640x480)
         preserve_aspect_ratio: Bảo toàn tỷ lệ khung hình, chống méo hình học bằng Letterbox padding
     Output:
         rgbd_tensor: [4, H, W] float32

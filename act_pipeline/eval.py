@@ -25,6 +25,9 @@ if hasattr(sys.stdout, "reconfigure") and sys.stdout.encoding != "utf-8":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception as exc:
         sys.stderr.write(f"[CẢNH BÁO] Không thể tái cấu hình encoding: {exc}\n")
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 import numpy as np
 import torch
@@ -125,14 +128,19 @@ def simulate_episode_rollout(
     device: torch.device,
     ensemble_m: float = 0.01,
     chunk_size: int = 50,
+    camera_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Giả lập Rollout liên tục theo thời gian thực (50Hz) trên 1 file Episode:
     So sánh quỹ đạo hành động thô (Raw Chunk) vs Làm mượt bằng Temporal Ensembling (exp(-m*i)).
+    Hỗ trợ cả đơn camera và đa camera (chest + front).
     """
     model.eval()
     ensemble = TemporalEnsemblePolicy(chunk_size=chunk_size, action_dim=16, ensemble_m=ensemble_m)
     ensemble.reset()
+
+    if camera_names is None:
+        camera_names = getattr(model, "camera_names", ["chest", "front"])
 
     with h5py.File(hdf5_path, "r") as f:
         gt_actions = f["action"][:].astype(np.float32)
@@ -152,25 +160,47 @@ def simulate_episode_rollout(
             use_frame_map = False
 
         obs_img = f["observations/images"]
-        raw_rgb = None
-        raw_depth = None
-        if "chest_rgb" in obs_img and "chest_depth" in obs_img:
-            raw_rgb = obs_img["chest_rgb"]
-            raw_depth = obs_img["chest_depth"]
-        elif "chest" in obs_img:
-            raw_rgb = obs_img["chest"]
-            raw_depth = obs_img["chest_depth"] if "chest_depth" in obs_img else None
+
+        def _get_cam_frame(cam: str, frame_i: int) -> torch.Tensor:
+            cands = [cam]
+            if cam == "front":
+                cands.extend(["opposite", "facing"])
+            rgb = None
+            depth = None
+            for c in cands:
+                if f"{c}_rgb" in obs_img:
+                    rgb = obs_img[f"{c}_rgb"][frame_i]
+                    break
+                elif c in obs_img:
+                    c_data = obs_img[c][frame_i]
+                    if c_data.ndim == 3 and c_data.shape[-1] == 4:
+                        rgb = c_data[..., :3]
+                        depth = c_data[..., 3]
+                    else:
+                        rgb = c_data
+                    break
+            if depth is None:
+                for c in cands:
+                    if f"{c}_depth" in obs_img:
+                        depth = obs_img[f"{c}_depth"][frame_i]
+                        break
+            if rgb is None:
+                first_k = list(obs_img.keys())[0]
+                rgb = obs_img[first_k][frame_i]
+            return preprocess_rgbd(rgb, depth, preserve_aspect_ratio=True)
 
         raw_pred_actions = []
         ensemble_pred_actions = []
 
         for t in range(T):
             cam_idx = frame_indices[t] if use_frame_map else t
-            # 1. Tiền xử lý RGB-D tại bước t (bảo toàn tỷ lệ khung hình 16:9)
-            rgb_t = raw_rgb[cam_idx] if raw_rgb.ndim == 4 else raw_rgb[cam_idx][..., :3]
-            depth_t = raw_depth[cam_idx] if raw_depth is not None else None
             
-            rgbd_tensor = preprocess_rgbd(rgb_t, depth_t, preserve_aspect_ratio=True).unsqueeze(0).to(device) # [1, 4, H, W]
+            # 1. Tiền xử lý RGB-D cho các góc camera
+            cam_tensors = [_get_cam_frame(c, cam_idx) for c in camera_names]
+            if len(camera_names) > 1:
+                rgbd_tensor = torch.stack(cam_tensors, dim=0).unsqueeze(0).to(device) # [1, num_cams, 4, H, W]
+            else:
+                rgbd_tensor = cam_tensors[0].unsqueeze(0).to(device)                   # [1, 4, H, W]
 
             # 2. Tiền xử lý qpos
             norm_qpos = normalize_data(qpos_seq[t], stats["qpos_mean"], stats["qpos_std"])
@@ -276,8 +306,8 @@ def eval_pipeline(args):
         meta_cfg = onnx_model.metadata.get("config", {})
         model_cfg = ModelConfig(
             in_channels=onnx_model.metadata.get("in_channels", 4),
-            img_height=onnx_model.metadata.get("img_height", meta_cfg.get("img_height", 240)),
-            img_width=onnx_model.metadata.get("img_width", meta_cfg.get("img_width", 424)),
+            img_height=onnx_model.metadata.get("img_height", meta_cfg.get("img_height", 480)),
+            img_width=onnx_model.metadata.get("img_width", meta_cfg.get("img_width", 640)),
             chunk_size=onnx_model.metadata.get("chunk_size", meta_cfg.get("chunk_size", 50)),
             action_dim=onnx_model.metadata.get("action_dim", meta_cfg.get("action_dim", 16)),
             qpos_dim=onnx_model.metadata.get("qpos_dim", meta_cfg.get("qpos_dim", 16)),
@@ -310,8 +340,8 @@ def eval_pipeline(args):
             in_channels=saved_cfg.get("in_channels", 4),
             backbone_type="convnext_nano",
             freeze_backbone=True,
-            img_height=saved_cfg.get("img_height", 240),
-            img_width=saved_cfg.get("img_width", 424),
+            img_height=saved_cfg.get("img_height", 480),
+            img_width=saved_cfg.get("img_width", 640),
             d_model=saved_cfg.get("d_model", 512),
             nheads=saved_cfg.get("nheads", 8),
             dim_feedforward=saved_cfg.get("dim_feedforward", 2048),
@@ -340,6 +370,7 @@ def eval_pipeline(args):
     eval_dataset = BimanualEpisodicDataset(
         file_paths=eval_files,
         stats=stats,
+        camera_names=args.camera_names,
         chunk_size=model_cfg.chunk_size,
         step_stride=2,
         target_img_size=(model_cfg.img_height, model_cfg.img_width),
@@ -383,6 +414,7 @@ def eval_pipeline(args):
         device=device,
         ensemble_m=args.ensemble_m,
         chunk_size=model_cfg.chunk_size,
+        camera_names=args.camera_names,
     )
 
     # Ghi biểu đồ sai số 16 khớp (Per-Joint MAE Figure) vào TensorBoard
@@ -459,6 +491,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Đánh giá mô hình ACT Bimanual OpenArm")
     parser.add_argument("--checkpoint_path", type=str, default="checkpoints/act_openarm/best_checkpoint.pth", help="Đường dẫn file checkpoint .pth")
     parser.add_argument("--dataset_dir", type=str, default="dataset/real_towel_folding", help="Thư mục chứa các file .hdf5 kiểm thử")
+    parser.add_argument("--camera_names", nargs="+", default=["chest", "front"], help="Danh sách tên các góc camera (mặc định: chest front)")
     parser.add_argument("--output_dir", type=str, default="evaluation_results", help="Thư mục xuất báo cáo đánh giá")
     parser.add_argument("--batch_size", type=int, default=16, help="Kích thước batch đánh giá")
     parser.add_argument("--num_workers", type=int, default=2, help="Số worker nạp dữ liệu")
