@@ -44,48 +44,68 @@ def parse_args():
     parser.add_argument("--episode", type=str, default=None, help="Đường dẫn file .hdf5 cần kiểm tra")
     parser.add_argument("--dataset_dir", type=str, default="data_set/data_set", help="Thư mục dataset chứa các file .hdf5")
     parser.add_argument("--step", type=int, default=50, help="Vị trí bước timestep trong episode (mặc định bước 50)")
+    parser.add_argument("--camera", type=str, default="chest", help="Góc camera cần hiển thị (ví dụ: chest, front)")
     parser.add_argument("--image", type=str, default=None, help="Đường dẫn file ảnh thông thường nếu không dùng hdf5")
     parser.add_argument("--backbone_type", type=str, default="convnext_nano", choices=["convnext_nano"], help="Loại mạng thị giác (độc quyền convnext_nano)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint .pth đã train (nếu không có sẽ dùng pretrained)")
     parser.add_argument("--output", type=str, default="vision_detection_check.png", help="Đường dẫn file ảnh xuất kết quả")
-    parser.add_argument("--img_height", type=int, default=240, help="Chiều cao ảnh chuẩn hóa (mặc định 240)")
-    parser.add_argument("--img_width", type=int, default=424, help="Chiều rộng ảnh chuẩn hóa (mặc định 424)")
+    parser.add_argument("--img_height", type=int, default=480, help="Chiều cao ảnh chuẩn hóa (mặc định 480)")
+    parser.add_argument("--img_width", type=int, default=640, help="Chiều rộng ảnh chuẩn hóa (mặc định 640)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cpu hoặc cuda")
     return parser.parse_args()
 
 
-def load_sample_from_hdf5(hdf5_path: str, step: int):
-    """Trích xuất 1 frame RGB và Depth từ file HDF5 episode."""
+def load_sample_from_hdf5(hdf5_path: str, step: int, camera: str = "chest"):
+    """Trích xuất 1 frame RGB và Depth từ file HDF5 episode cho góc camera được chọn."""
     import h5py
     with h5py.File(hdf5_path, "r") as f:
-        # Tìm key hình ảnh theo quy ước DATA_FORMAT_SPECIFICATION.md
-        cam_key = None
-        for k in ["chest", "cam_chest", "front", "head"]:
-            if f"/observations/images/{k}" in f:
-                cam_key = f"/observations/images/{k}"
+        obs_img = f["/observations/images"]
+        cam_candidates = [camera]
+        if camera == "front":
+            cam_candidates.extend(["opposite", "facing"])
+        elif camera == "chest":
+            cam_candidates.extend(["cam_chest"])
+
+        # Tìm RGB
+        rgb_key = None
+        for cand in cam_candidates:
+            if f"{cand}_rgb" in obs_img:
+                rgb_key = f"/observations/images/{cand}_rgb"
                 break
-        if cam_key is None:
-            # Lấy key đầu tiên trong observations/images
-            keys = list(f["/observations/images"].keys())
+            elif cand in obs_img:
+                rgb_key = f"/observations/images/{cand}"
+                break
+
+        if rgb_key is None:
+            # Fallback lấy key đầu tiên
+            keys = list(obs_img.keys())
             if not keys:
                 raise ValueError(f"Không tìm thấy ảnh camera trong {hdf5_path}")
-            cam_key = f"/observations/images/{keys[0]}"
+            rgb_key = f"/observations/images/{keys[0]}"
 
-        rgb_dset = f[cam_key]
+        rgb_dset = f[rgb_key]
         num_steps = rgb_dset.shape[0]
         step = max(0, min(step, num_steps - 1))
-        rgb = np.array(rgb_dset[step])
+        raw_data = np.array(rgb_dset[step])
+        if raw_data.ndim == 3 and raw_data.shape[-1] == 4:
+            rgb = raw_data[..., :3]
+            depth = raw_data[..., 3]
+        else:
+            rgb = raw_data
+            depth = None
 
-        # Tìm Depth tương ứng nếu có
-        depth = None
-        depth_key = cam_key.replace("images", "depths") if "depths" in f["/observations"] else None
-        if depth_key and depth_key in f:
-            depth = np.array(f[depth_key][step])
-        elif f"/observations/images/{cam_key.split('/')[-1]}_depth" in f:
-            depth = np.array(f[f"/observations/images/{cam_key.split('/')[-1]}_depth"][step])
+        # Tìm Depth tương ứng nếu chưa có
+        if depth is None:
+            depth_key = rgb_key.replace("_rgb", "_depth")
+            if depth_key in f:
+                depth = np.array(f[depth_key][step])
+            else:
+                for cand in cam_candidates:
+                    if f"/observations/images/{cand}_depth" in f:
+                        depth = np.array(f[f"/observations/images/{cand}_depth"][step])
+                        break
 
         if depth is None:
-            # Tạo depth giả định 0.6m nếu file không lưu depth riêng
             depth = np.full((rgb.shape[0], rgb.shape[1]), 600.0, dtype=np.float32)
 
         return rgb, depth, step, num_steps
@@ -133,17 +153,17 @@ def main():
                 sys.exit(1)
             ep_path = files[0]
 
-        rgb_raw, depth_raw, step_idx, total_steps = load_sample_from_hdf5(ep_path, args.step)
-        info_str = f"File: {os.path.basename(ep_path)} | Timestep: {step_idx}/{total_steps}"
+        rgb_raw, depth_raw, step_idx, total_steps = load_sample_from_hdf5(ep_path, args.step, camera=args.camera)
+        info_str = f"File: {os.path.basename(ep_path)} | Cam: {args.camera} | Timestep: {step_idx}/{total_steps}"
 
     print("=" * 80)
-    print(f"🔍 KIỂM TRA ĐẶC TRƯNG THỊ GIÁC RESNET-18 (VISUAL DETECTION CHECK)")
+    print(f"🔍 KIỂM TRA ĐẶC TRƯNG THỊ GIÁC CONVNEXT-NANO (VISUAL DETECTION CHECK)")
     print("=" * 80)
     print(f"[*] Nguồn ảnh  : {info_str}")
     print(f"[*] Kích thước : {rgb_raw.shape[1]}x{rgb_raw.shape[0]} px")
     print(f"[*] Thiết bị   : {device}")
 
-    # 2. Tiền xử lý RGB-D (chuẩn hóa kênh & kích thước 240x424)
+    # 2. Tiền xử lý RGB-D (chuẩn hóa kênh & kích thước 640x480)
     rgbd_tensor = preprocess_rgbd(
         rgb_raw=rgb_raw,
         depth_raw=depth_raw,
@@ -205,12 +225,12 @@ def main():
     heat_l3 = get_feature_activation_map(feat_l3)
     heat_l4 = get_feature_activation_map(feat_l4)
 
-    # Resize Heatmap về kích thước ảnh 240x424
+    # Resize Heatmap về kích thước ảnh 640x480
     h, w = args.img_height, args.img_width
     heat_l3_resized = cv2.resize(heat_l3, (w, h), interpolation=cv2.INTER_CUBIC)
     heat_l4_resized = cv2.resize(heat_l4, (w, h), interpolation=cv2.INTER_CUBIC)
 
-    # Chuẩn bị ảnh hiển thị gốc (resize về 240x424 để đồng bộ)
+    # Chuẩn bị ảnh hiển thị gốc (resize về 640x480 để đồng bộ)
     rgb_resized = cv2.resize(rgb_raw, (w, h), interpolation=cv2.INTER_AREA)
 
     # Tạo Overlay Heatmap lên ảnh gốc bằng Colormap JET
@@ -226,7 +246,7 @@ def main():
 
     # Ô 1: Ảnh gốc RGB
     axes[0, 0].imshow(rgb_resized)
-    axes[0, 0].set_title("1. Ảnh Camera Gốc (RGB 240x424)", fontsize=11)
+    axes[0, 0].set_title("1. Ảnh Camera Gốc (RGB 640x480)", fontsize=11)
     axes[0, 0].axis("off")
 
     # Ô 2: Heatmap Stage 2 (Đặc trưng viền, cấu trúc hình học vật thể)

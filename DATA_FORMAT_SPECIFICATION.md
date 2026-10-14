@@ -1,16 +1,16 @@
 # Quy Chuẩn Định Dạng Dữ Liệu Đầu Vào Chuẩn RGB-D (Data Format Specification)
 **Dự án**: VinRobotics - OpenArm Autonomous Manipulation  
 **Mô hình**: ACT (Action Chunking with Transformers)  
-**Phần cứng áp dụng**: Robot Bimanual OpenArm (16-DOF: 2 tay x [7 khớp xoay + 1 kẹp Gripper]) + **01 Camera trước ngực RGB-D (Chest RGB-D)**
+**Phần cứng áp dụng**: Robot Bimanual OpenArm (16-DOF: 2 tay x [7 khớp xoay + 1 kẹp Gripper]) + **02 Camera RGB-D (01 Chest RGB-D gắn ngực + 01 Front RGB-D đặt đối diện robot)**
 
 ---
 
 ## 1. TỔNG QUAN
 
 Tài liệu này là **quy chuẩn kỹ thuật thống nhất (Single Source of Truth)** cho toàn bộ pipeline dữ liệu của dự án:
-1. **Team Data Recorder**: Viết script thu thập dữ liệu Teleoperation, đồng bộ hóa thời gian giữa Camera RGB-D và CAN-FD bus, đóng gói vào file `.hdf5`.
-2. **Team Model & DataLoader**: Đọc dữ liệu, tiền xử lý chuẩn hóa RGB-D 4 kênh, tạo mini-batch đưa vào mô hình ACT để huấn luyện.
-3. **Team Deployment / Integration**: Lấy luồng ảnh RGB-D trực tiếp từ camera, đọc góc 16 motor qua SocketCAN, chuẩn hóa theo đúng công thức lúc train để chạy Inference.
+1. **Team Data Recorder**: Viết script thu thập dữ liệu Teleoperation, đồng bộ hóa thời gian giữa 02 Camera RGB-D (ngực và đối diện) và CAN-FD bus, đóng gói vào file `.hdf5`.
+2. **Team Model & DataLoader**: Đọc dữ liệu, tiền xử lý chuẩn hóa RGB-D 4 kênh cho từng góc camera, tạo mini-batch đưa vào mô hình ACT để huấn luyện.
+3. **Team Deployment / Integration**: Lấy luồng ảnh RGB-D trực tiếp từ 02 camera, đọc góc 16 motor qua SocketCAN, chuẩn hóa theo đúng công thức lúc train để chạy Inference.
 
 ---
 
@@ -30,14 +30,17 @@ Tài liệu này là **quy chuẩn kỹ thuật thống nhất (Single Source of
 
 ---
 
-## 3. CẤU TRÚC CHI TIẾT FILE HDF5 (SCHEMA CHUẨN RGB-D)
+## 3. CẤU TRÚC CHI TIẾT FILE HDF5 (SCHEMA CHUẨN RGB-D ĐA CAMERA)
 
 ```text
 root (HDF5 File: episode_XX.hdf5)
 │
 ├── [Attributes]
+│   ├── "cameras_json"      : '["chest", "front"]' (str JSON) — Danh sách 2 góc camera
+│   ├── "action_representation": "absolute_joint_position" (str)
 │   ├── "sim"               : False (bool)
-│   ├── "frequency_hz"      : 50 (int)
+│   ├── "frequency_hz"      : 50.0 (float/int)
+│   ├── "control_dt"        : 0.02 (float)
 │   ├── "robot_type"        : "OpenArm_Bimanual_16DOF" (str)
 │   ├── "num_joints"        : 16 (int)
 │   ├── "depth_scale"       : 0.001 (float) — 1 đơn vị uint16 = 1 mm (0.001 m)
@@ -45,8 +48,10 @@ root (HDF5 File: episode_XX.hdf5)
 │
 ├── /observations (Group)
 │   ├── /images (Group)
-│   │   ├── chest_rgb       : [T, 240, 424, 3] | uint8   | Ảnh màu RGB (0-255, chuẩn 16:9 RealSense)
-│   │   └── chest_depth     : [T, 240, 424]    | uint16  | Bản đồ độ sâu Depth Z (milimét: 0 - 65535)
+│   │   ├── chest_rgb       : [T, 480, 640, 3] | uint8   | Camera ngực: Ảnh màu RGB (0-255)
+│   │   ├── chest_depth     : [T, 480, 640]    | uint16  | Camera ngực: Bản đồ độ sâu Depth Z (mm: 0 - 65535)
+│   │   ├── front_rgb       : [T, 480, 640, 3] | uint8   | Camera đối diện: Ảnh màu RGB (0-255)
+│   │   └── front_depth     : [T, 480, 640]    | uint16  | Camera đối diện: Bản đồ độ sâu Depth Z (mm)
 │   │
 │   ├── qpos                : [T, 16]          | float32 | Góc vị trí 16 motor (Radian)
 │   ├── qvel                : [T, 16]          | float32 | Vận tốc góc 16 motor (Radian/s)
@@ -60,12 +65,13 @@ root (HDF5 File: episode_XX.hdf5)
 
 | Tên trường (Key) | Kích thước (Shape) | Kiểu dữ liệu | Đơn vị | Quy định kỹ thuật bắt buộc |
 | :--- | :--- | :--- | :---: | :--- |
-| `/observations/images/chest_rgb` | `[T, 240, 424, 3]` | `uint8` ($0 - 255$) | Pixel | **Chuẩn RGB tỷ lệ 16:9** (424x240 hoặc 848x480). Không ép về 4:3 (480x640) gây méo hình học không gian. |
-| `/observations/images/chest_depth`| `[T, 240, 424]` | `uint16` ($0 - 65535$) | Milimét (mm) | **Bắt buộc bật `align_to_color`** từ SDK camera để tọa độ $(u, v)$ của Depth trùng khớp $100\%$ với điểm ảnh RGB. Lưu `uint16` để tối ưu $50\%$ dung lượng ổ cứng so với `float32`. |
+| `/observations/images/chest_rgb` | `[T, 480, 640, 3]` | `uint8` ($0 - 255$) | Pixel | **Camera ngực robot (Egocentric)**: Chuẩn RGB 640x480. |
+| `/observations/images/chest_depth`| `[T, 480, 640]` | `uint16` ($0 - 65535$) | Milimét (mm) | **Bắt buộc bật `align_to_color`**, lưu uint16 (mm) để tối ưu $50\%$ dung lượng. |
+| `/observations/images/front_rgb` | `[T, 480, 640, 3]` | `uint8` ($0 - 255$) | Pixel | **Camera đặt đối diện robot (Front/Facing)**: Chuẩn RGB 640x480. |
+| `/observations/images/front_depth`| `[T, 480, 640]` | `uint16` ($0 - 65535$) | Milimét (mm) | **Bắt buộc bật `align_to_color`** cho camera đối diện. |
 | `timestamp_ns` | `[T]` | `int64` | Nanoseconds | **Thời điểm ghi nhận thực tế**. Dùng để đồng bộ hóa tần số 50 Hz và phát hiện rớt khung hình (Frame Drop). |
 | `/observations/qpos` | `[T, 16]` | `float32` | Radian | Góc thực tế của 16 động cơ: `[Tay Trái J1..J7, Kẹp Trái J8, Tay Phải J1..J7, Kẹp Phải J8]`. |
 | `/observations/qvel` | `[T, 16]` | `float32` | Rad/s | Vận tốc góc tức thời của 16 động cơ. |
-| `/observations/effort` | `[T, 16]` | `float32` | Nm | Dòng tải/Mô-men xoắn của 16 động cơ (Tùy chọn ghi nhận từ telemetry CAN). |
 | `/action` | `[T, 16]` | `float32` | Radian | Góc mục tiêu $q_{\text{des}}$ của bước kế tiếp ($t+1$). Trong teleop bimanual, đây là góc của cặp tay Leader hoặc vị trí mong muốn của Follower. |
 
 ---
@@ -158,29 +164,37 @@ def validate_hdf5(filepath):
         assert "action" in f, "LỖI: Thiếu dataset 'action'"
         assert "images/chest_rgb" in f["observations"], "LỖI: Thiếu 'observations/images/chest_rgb'"
         assert "images/chest_depth" in f["observations"], "LỖI: Thiếu 'observations/images/chest_depth'"
+        assert "images/front_rgb" in f["observations"], "LỖI: Thiếu 'observations/images/front_rgb'"
+        assert "images/front_depth" in f["observations"], "LỖI: Thiếu 'observations/images/front_depth'"
         assert "qpos" in f["observations"], "LỖI: Thiếu 'observations/qpos'"
         assert "qvel" in f["observations"], "LỖI: Thiếu 'observations/qvel'"
         
         # 2. Lấy shape và kiểu dữ liệu
         chest_rgb = f["observations/images/chest_rgb"]
         chest_depth = f["observations/images/chest_depth"]
+        front_rgb = f["observations/images/front_rgb"]
+        front_depth = f["observations/images/front_depth"]
         qpos = f["observations/qpos"]
         action = f["action"]
         T = action.shape[0]
         
-        print(f"  + Số bước thời gian (T)   : {T} timesteps (~{T/50:.1f}s)")
-        print(f"  + Shape ảnh RGB ngực      : {chest_rgb.shape} | Dtype: {chest_rgb.dtype}")
-        print(f"  + Shape ảnh Depth ngực    : {chest_depth.shape} | Dtype: {chest_depth.dtype}")
-        print(f"  + Shape góc khớp qpos     : {qpos.shape}  | Dtype: {qpos.dtype}")
-        print(f"  + Shape hành động action  : {action.shape}| Dtype: {action.dtype}")
+        print(f"  + Số bước thời gian (T)      : {T} timesteps (~{T/50:.1f}s)")
+        print(f"  + Shape ảnh RGB ngực         : {chest_rgb.shape} | Dtype: {chest_rgb.dtype}")
+        print(f"  + Shape ảnh Depth ngực       : {chest_depth.shape} | Dtype: {chest_depth.dtype}")
+        print(f"  + Shape ảnh RGB đối diện     : {front_rgb.shape} | Dtype: {front_rgb.dtype}")
+        print(f"  + Shape ảnh Depth đối diện   : {front_depth.shape} | Dtype: {front_depth.dtype}")
+        print(f"  + Shape góc khớp qpos        : {qpos.shape}  | Dtype: {qpos.dtype}")
+        print(f"  + Shape hành động action     : {action.shape}| Dtype: {action.dtype}")
         
         # 3. Ràng buộc khắt khe về kích thước và định dạng
-        assert chest_rgb.shape == (T, 480, 640, 3), f"LỖI: Shape RGB {chest_rgb.shape} != ({T}, 480, 640, 3)"
-        assert chest_depth.shape == (T, 480, 640), f"LỖI: Shape Depth {chest_depth.shape} != ({T}, 480, 640)"
+        assert chest_rgb.shape == (T, 480, 640, 3), f"LỖI: Shape RGB ngực {chest_rgb.shape} != ({T}, 480, 640, 3)"
+        assert chest_depth.shape == (T, 480, 640), f"LỖI: Shape Depth ngực {chest_depth.shape} != ({T}, 480, 640)"
+        assert front_rgb.shape == (T, 480, 640, 3), f"LỖI: Shape RGB đối diện {front_rgb.shape} != ({T}, 480, 640, 3)"
+        assert front_depth.shape == (T, 480, 640), f"LỖI: Shape Depth đối diện {front_depth.shape} != ({T}, 480, 640)"
         assert qpos.shape == (T, 16), f"LỖI: Shape qpos {qpos.shape} != ({T}, 16) (Bắt buộc 16 khớp 2 tay)"
         assert action.shape == (T, 16), f"LỖI: Shape action {action.shape} != ({T}, 16) (Bắt buộc 16 khớp 2 tay)"
-        assert chest_rgb.dtype == np.uint8, "LỖI: RGB phải là uint8 (0-255)"
-        assert chest_depth.dtype == np.uint16, "LỖI: Depth phải là uint16 (mm) để tối ưu dung lượng"
+        assert chest_rgb.dtype == np.uint8 and front_rgb.dtype == np.uint8, "LỖI: RGB phải là uint8 (0-255)"
+        assert chest_depth.dtype == np.uint16 and front_depth.dtype == np.uint16, "LỖI: Depth phải là uint16 (mm)"
         assert qpos.dtype == np.float32, "LỖI: qpos phải là float32"
         assert action.dtype == np.float32, "LỖI: action phải là float32"
         assert not np.isnan(action[:]).any(), "LỖI: Dữ liệu action chứa giá trị NaN!"
@@ -194,7 +208,7 @@ def validate_hdf5(filepath):
         print(f"  + Tỷ lệ điểm ảnh Depth hợp lệ: {valid_ratio:.1f}%")
         assert valid_ratio > 85.0, "CẢNH BÁO: Quá nhiều điểm mù (Holes) trên kênh Depth (< 85%)!"
 
-    print("[✓] CHÚC MỪNG: File đạt chuẩn 100% RGB-D + 16-DOF cho Bimanual OpenArm ACT Pipeline!\n")
+    print("[✓] CHÚC MỪNG: File đạt chuẩn 100% RGB-D 2 Camera + 16-DOF cho Bimanual OpenArm ACT Pipeline!\n")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

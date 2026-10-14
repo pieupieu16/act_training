@@ -92,13 +92,20 @@ def export_act_to_onnx(
     raw_model = model.module if hasattr(model, "module") else model
     raw_model.eval()
 
-    # Determine input dimensions from config or model attributes (Chuẩn 16:9 RealSense 240x424)
-    img_height = getattr(raw_model.config, "img_height", 240) if hasattr(raw_model, "config") else 240
-    img_width = getattr(raw_model.config, "img_width", 424) if hasattr(raw_model, "config") else 424
+    # Determine input dimensions from config or model attributes (Chuẩn Camera 640x480)
+    img_height = getattr(raw_model.config, "img_height", 480) if hasattr(raw_model, "config") else 480
+    img_width = getattr(raw_model.config, "img_width", 640) if hasattr(raw_model, "config") else 640
     in_channels = getattr(raw_model.config, "in_channels", 4) if hasattr(raw_model, "config") else 4
     qpos_dim = getattr(raw_model.config, "qpos_dim", 16) if hasattr(raw_model, "config") else 16
     chunk_size = getattr(raw_model.config, "chunk_size", 50) if hasattr(raw_model, "config") else 50
     action_dim = getattr(raw_model.config, "action_dim", 16) if hasattr(raw_model, "config") else 16
+
+    num_cameras = getattr(raw_model, "num_cameras", 1)
+    if hasattr(raw_model, "config") and hasattr(raw_model.config, "num_cameras"):
+        num_cameras = raw_model.config.num_cameras
+    camera_names = getattr(raw_model, "camera_names", ["chest", "front"] if num_cameras == 2 else ["chest"])
+    if hasattr(raw_model, "config") and hasattr(raw_model.config, "camera_names"):
+        camera_names = raw_model.config.camera_names
 
     wrapper = ACTInferenceWrapper(raw_model).eval()
 
@@ -106,11 +113,17 @@ def export_act_to_onnx(
     param_device = next(raw_model.parameters()).device
     # Use batch size = 2 for dummy inputs when dynamic_batch=True to avoid Dim(1) specialization guards
     sample_batch = 2 if dynamic_batch else 1
-    dummy_image = torch.randn(sample_batch, in_channels, img_height, img_width, device=param_device)
+    if num_cameras > 1:
+        dummy_image = torch.randn(sample_batch, num_cameras, in_channels, img_height, img_width, device=param_device)
+        img_shape_str = f"[{sample_batch}, {num_cameras}, {in_channels}, {img_height}, {img_width}]"
+    else:
+        dummy_image = torch.randn(sample_batch, in_channels, img_height, img_width, device=param_device)
+        img_shape_str = f"[{sample_batch}, {in_channels}, {img_height}, {img_width}]"
     dummy_qpos = torch.randn(sample_batch, qpos_dim, device=param_device)
 
     log_info(f"[*] Đang xuất mô hình ACT sang ONNX tại: {output_path}")
-    log_info(f"    - Kích thước đầu vào: image [{sample_batch}, {in_channels}, {img_height}, {img_width}], qpos [{sample_batch}, {qpos_dim}]")
+    log_info(f"    - Kích thước đầu vào: image {img_shape_str}, qpos [{sample_batch}, {qpos_dim}]")
+    log_info(f"    - Cấu hình camera ({num_cameras} góc): {camera_names}")
     log_info(f"    - Kích thước đầu ra: action_chunk [{sample_batch}, {chunk_size}, {action_dim}]")
     log_info(f"    - ONNX Opset Version: {opset_version}")
     log_info(f"    - Dynamic Batch Size : {'BẬT' if dynamic_batch else 'TẮT (Batch=1)'}")
@@ -150,6 +163,8 @@ def export_act_to_onnx(
         "version": "1.0.0",
         "input_names": ["image", "qpos"],
         "output_names": ["action_chunk"],
+        "num_cameras": num_cameras,
+        "camera_names": list(camera_names),
         "in_channels": in_channels,
         "img_height": img_height,
         "img_width": img_width,

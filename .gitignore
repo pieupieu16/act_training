@@ -59,4 +59,5 @@ wandb/
 .vscode/
 *.swp
 *.swo
+.claude/
 

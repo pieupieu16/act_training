@@ -6,7 +6,13 @@ from act_pipeline.models.backbone import (
     SinusoidalPositionEmbedding2D,
 )
 from act_pipeline.models.cvae import CVAEEncoder
-from act_pipeline.models.policy import TransformerPolicyDecoder, SinusoidalPositionEmbedding1D
+from act_pipeline.models.policy import (
+    TransformerPolicyDecoder,
+    SinusoidalPositionEmbedding1D,
+    ACTDecoderLayer,
+    ACTTransformerDecoder,
+)
+from act_pipeline.models.attention_loss import CrossAttentionLossModule
 from act_pipeline.models.act_model import ACTPolicy
 
 __all__ = [
@@ -16,5 +22,8 @@ __all__ = [
     "CVAEEncoder",
     "TransformerPolicyDecoder",
     "SinusoidalPositionEmbedding1D",
+    "ACTDecoderLayer",
+    "ACTTransformerDecoder",
+    "CrossAttentionLossModule",
     "ACTPolicy",
 ]
